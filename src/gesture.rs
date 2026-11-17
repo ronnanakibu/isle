@@ -17,6 +17,7 @@ struct Drag {
 
 pub enum Release {
     Click,
+    #[allow(dead_code)]
     Swiped { from: usize, to: usize },
 }
 
@@ -47,6 +48,7 @@ impl Pager {
         }
     }
 
+    #[allow(dead_code)]
     pub fn content_x(&self) -> f32 {
         self.x.current
     }
@@ -55,6 +57,7 @@ impl Pager {
         self.drag.as_ref().map_or(false, |d| d.moved)
     }
 
+    #[allow(dead_code)]
     pub fn is_moving(&self) -> bool {
         self.is_dragging()
             || (self.x.current - self.x.target).abs() > 0.5

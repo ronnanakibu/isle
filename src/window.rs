@@ -27,6 +27,7 @@ const WIN_WM_MOUSELEAVE: u32 = 0x02A3;
 pub struct WindowContext {
     pub hwnd: HWND,
     pub hdc_mem: HDC,
+    #[allow(dead_code)]
     pub hbitmap: HBITMAP,
     pub p_bits: *mut u32,
     pub surface: Surface,

@@ -1,6 +1,8 @@
 //! Apple Dynamic Island Design Tokens & Constants
 //! Recreated from Apple Human Interface Guidelines & iOS 17/18 Live Activity specifications
 
+#![allow(dead_code)]
+
 pub const CANVAS_WIDTH: i32 = 740;
 pub const CANVAS_HEIGHT: i32 = 220;
 

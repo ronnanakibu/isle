@@ -36,6 +36,7 @@ pub struct MediaSnapshot {
     pub has_session: bool,
     pub title: String,
     pub artist: String,
+    #[allow(dead_code)]
     pub album: String,
     pub source: String,
     pub playing: bool,

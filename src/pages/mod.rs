@@ -18,6 +18,7 @@ impl PageId {
         PageId::Shelf,
     ];
 
+    #[allow(dead_code)]
     pub fn title(&self) -> &'static str {
         match self {
             PageId::Music => "Now Playing",
@@ -38,6 +39,7 @@ impl PageId {
         }
     }
 
+    #[allow(dead_code)]
     pub fn next(&self) -> PageId {
         match self {
             PageId::Music => PageId::Pomodoro,
@@ -48,6 +50,7 @@ impl PageId {
         }
     }
 
+    #[allow(dead_code)]
     pub fn prev(&self) -> PageId {
         match self {
             PageId::Music => PageId::Shelf,

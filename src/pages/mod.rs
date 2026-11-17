@@ -28,6 +28,16 @@ impl PageId {
         }
     }
 
+    pub fn from_index(i: usize) -> PageId {
+        match i % 5 {
+            0 => PageId::Music,
+            1 => PageId::Pomodoro,
+            2 => PageId::Water,
+            3 => PageId::Todo,
+            _ => PageId::Shelf,
+        }
+    }
+
     pub fn next(&self) -> PageId {
         match self {
             PageId::Music => PageId::Pomodoro,
@@ -47,6 +57,29 @@ impl PageId {
             PageId::Shelf => PageId::Todo,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HitTarget {
+    None,
+    PageDot(usize),
+    // Music
+    MediaPrev,
+    MediaPlayPause,
+    MediaNext,
+    Scrubber,
+    // Pomodoro
+    PomoMode(usize),
+    PomoStart,
+    PomoReset,
+    // Water
+    WaterAdd250,
+    WaterAdd500,
+    WaterReset,
+    // Tasks
+    TaskItem(usize),
+    // Shelf
+    ShelfOpen(usize),
 }
 
 pub struct PageState {
@@ -75,21 +108,21 @@ impl Default for PageState {
     fn default() -> Self {
         Self {
             current_page: PageId::Music,
-            is_playing: true,
-            track_title: "Starboy".to_string(),
-            track_artist: "The Weeknd ft. Daft Punk".to_string(),
-            current_lyric: "\"I come alive in the fall time...\"".to_string(),
-            track_progress: 0.38,
-            eq_bars: [0.5, 0.85, 0.35, 0.95, 0.6],
-            pomo_seconds_left: 24 * 60 + 48,
-            pomo_running: true,
+            is_playing: false,
+            track_title: "Nothing Playing".to_string(),
+            track_artist: "Open Spotify, YouTube, or Apple Music".to_string(),
+            current_lyric: "Live activity ready".to_string(),
+            track_progress: 0.0,
+            eq_bars: [0.0; 5],
+            pomo_seconds_left: 25 * 60,
+            pomo_running: false,
             pomo_mode: 0,
             water_taken_ml: 850,
             water_goal_ml: 1500,
             tasks: vec![
                 ("Refine dynamic island curves".to_string(), true),
                 ("Apple spring physics damping".to_string(), true),
-                ("High-resolution album artwork".to_string(), false),
+                ("Live WinRT SMTC audio integration".to_string(), true),
             ],
             shelf_items: vec![
                 ("Design_Review.fig".to_string(), "14.2 MB".to_string()),

@@ -4,3 +4,7 @@ pub mod mascot;
 pub mod pages;
 pub mod render;
 pub mod window;
+pub mod settings;
+pub mod tray;
+pub mod media;
+pub mod gesture;

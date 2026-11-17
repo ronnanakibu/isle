@@ -7,6 +7,10 @@ mod mascot;
 mod pages;
 mod render;
 mod window;
+mod settings;
+mod tray;
+mod media;
+mod gesture;
 
 use windows::core::w;
 use windows::Win32::Foundation::GetLastError;

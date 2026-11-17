@@ -1,5 +1,5 @@
 //! Win32 Layered Window Management for Apple Dynamic Island
-//! Zero-Idle CPU lifecycle, smooth 60 FPS spring physics, and crisp typography
+//! Zero-Idle CPU lifecycle, smooth 60 FPS spring physics, WinRT SMTC, Pager & Tray Settings
 
 use std::mem::zeroed;
 use std::ptr::null_mut;
@@ -15,6 +15,10 @@ use crate::spring::*;
 use crate::mascot::*;
 use crate::pages::*;
 use crate::render::*;
+use crate::settings::{Mode, Settings};
+use crate::tray::*;
+use crate::media::*;
+use crate::gesture::*;
 
 const TIMER_ANIMATION: usize = 1;
 const TIMER_MASCOT_BLINK: usize = 2;
@@ -30,19 +34,20 @@ pub struct WindowContext {
     pub height_spring: Spring,
     pub mascot: Mascot,
     pub page_state: PageState,
+    pub media_hook: MediaHook,
+    pub media: MediaSnapshot,
+    pub pager: Pager,
+    pub settings: Settings,
     pub is_hovered: bool,
     pub is_animating: bool,
     pub mouse_x: i32,
     pub mouse_y: i32,
+    pub hovered_hit: HitTarget,
+    pub press_hit: HitTarget,
     pub tick_counter: u32,
 }
 
 static mut CONTEXT: Option<WindowContext> = None;
-
-unsafe fn send_media_key(key: VIRTUAL_KEY) {
-    keybd_event(key.0 as u8, 0, KEYBD_EVENT_FLAGS(0), 0);
-    keybd_event(key.0 as u8, 0, KEYEVENTF_KEYUP, 0);
-}
 
 pub unsafe fn run_window() -> windows::core::Result<()> {
     let instance = GetModuleHandleW(None)?;
@@ -58,9 +63,8 @@ pub unsafe fn run_window() -> windows::core::Result<()> {
 
     RegisterClassExW(&wcx);
 
-    let screen_w = GetSystemMetrics(SM_CXSCREEN);
-    let win_x = (screen_w - CANVAS_WIDTH) / 2;
-    let win_y = 0;
+    let settings = Settings::load();
+    let (win_x, win_y) = settings.anchor(CANVAS_WIDTH, 10);
 
     let hwnd = CreateWindowExW(
         WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED,
@@ -102,13 +106,17 @@ pub unsafe fn run_window() -> windows::core::Result<()> {
     SelectObject(hdc_mem, hbitmap);
     ReleaseDC(None, hdc_screen);
 
-    // Initial state: Start expanded and fluidly spring-contract into the compact pill on launch!
+    // Initial state: start expanded, fluidly spring into compact pill
     let mut w_spring = Spring::new(EXPANDED_WIDTH);
     let mut h_spring = Spring::new(EXPANDED_HEIGHT);
     w_spring.current = EXPANDED_WIDTH;
     h_spring.current = EXPANDED_HEIGHT;
     w_spring.set_target(COMPACT_WIDTH);
     h_spring.set_target(COMPACT_HEIGHT);
+
+    let media_hook = MediaHook::start(hwnd);
+    let media = media_hook.snapshot();
+    let pager = Pager::new(EXPANDED_WIDTH);
 
     let ctx = WindowContext {
         hwnd,
@@ -120,10 +128,16 @@ pub unsafe fn run_window() -> windows::core::Result<()> {
         height_spring: h_spring,
         mascot: Mascot::new(),
         page_state: PageState::default(),
+        media_hook,
+        media,
+        pager,
+        settings,
         is_hovered: false,
         is_animating: true,
         mouse_x: 0,
         mouse_y: 0,
+        hovered_hit: HitTarget::None,
+        press_hit: HitTarget::None,
         tick_counter: 0,
     };
 
@@ -139,15 +153,12 @@ pub unsafe fn run_window() -> windows::core::Result<()> {
         SWP_SHOWWINDOW | SWP_NOACTIVATE,
     )?;
 
+    add_tray_icon(hwnd);
     update_window_surface();
 
-    // Start 60 FPS animation timer for the intro spring transition
     SetTimer(hwnd, TIMER_ANIMATION, 16, None);
-
-    // Start mascot blink timer (100ms check)
     SetTimer(hwnd, TIMER_MASCOT_BLINK, 100, None);
 
-    // Message Loop (Zero-idle: Sleep in GetMessageW until an event arrives)
     let mut msg: MSG = zeroed();
     while GetMessageW(&mut msg, None, 0, 0).into() {
         let _ = TranslateMessage(&msg);
@@ -162,8 +173,9 @@ unsafe fn update_window_surface() {
     if let Some(ctx) = (*ctx_ptr).as_mut() {
         let expand_t = ((ctx.width_spring.current - COMPACT_WIDTH) / (EXPANDED_WIDTH - COMPACT_WIDTH)).clamp(0.0, 1.0);
         let smoothed_t = smoothstep(0.0, 1.0, expand_t);
+        let is_flat_top = ctx.settings.mode == Mode::Notch;
 
-        // 1. High-fidelity vector/squircle rasterization pass
+        // 1. Vector/squircle rasterization pass
         render_apple_island(
             &mut ctx.surface,
             &ctx.width_spring,
@@ -171,6 +183,9 @@ unsafe fn update_window_surface() {
             smoothed_t,
             &ctx.mascot,
             &ctx.page_state,
+            &ctx.media,
+            is_flat_top,
+            ctx.hovered_hit,
         );
 
         // Copy rendered pixels into DIB Section
@@ -182,7 +197,7 @@ unsafe fn update_window_surface() {
 
         let cur_w = ctx.width_spring.current as i32;
         let x0 = (CANVAS_WIDTH - cur_w) / 2;
-        let y0 = 10;
+        let y0 = if is_flat_top { 0 } else { 10 };
 
         // 2. Crisp GDI Typography Pass for Expanded state
         if smoothed_t > 0.3 {
@@ -193,6 +208,7 @@ unsafe fn update_window_surface() {
                 cur_w,
                 smoothed_t,
                 &ctx.page_state,
+                &ctx.media,
             );
 
             // Post-pass: Fix alpha channel for GDI painted text inside the island
@@ -207,7 +223,6 @@ unsafe fn update_window_surface() {
                     let idx = row_offset + x;
                     let val = *ctx.p_bits.add(idx);
                     let rgb = val & 0x00FFFFFF;
-                    // If GDI drew non-black text onto the surface, ensure full 255 alpha
                     if rgb > 0x001A1A1A {
                         *ctx.p_bits.add(idx) = 0xFF000000 | rgb;
                     }
@@ -216,11 +231,8 @@ unsafe fn update_window_surface() {
         }
 
         // 3. UpdateLayeredWindow
-        let screen_w = GetSystemMetrics(SM_CXSCREEN);
-        let pt_dst = POINT {
-            x: (screen_w - CANVAS_WIDTH) / 2,
-            y: 0,
-        };
+        let (win_x, win_y) = ctx.settings.anchor(CANVAS_WIDTH, 10);
+        let pt_dst = POINT { x: win_x, y: win_y };
         let pt_src = POINT { x: 0, y: 0 };
         let size = SIZE {
             cx: CANVAS_WIDTH,
@@ -248,6 +260,90 @@ unsafe fn update_window_surface() {
     }
 }
 
+fn hit_test(x: f32, y: f32, x0: f32, y0: f32, cur_w: f32, cur_h: f32, current_page: PageId) -> HitTarget {
+    let center_x = x0 + cur_w * 0.5;
+
+    // Check bottom pagination dots
+    let dot_y = y0 + cur_h - 12.0;
+    if (y - dot_y).abs() < 12.0 {
+        let dots_count = PageId::ALL.len();
+        let spacing = 14.0;
+        let start_x = center_x - ((dots_count as f32 - 1.0) * spacing) * 0.5;
+        for (i, _) in PageId::ALL.iter().enumerate() {
+            let px = start_x + (i as f32) * spacing;
+            if (x - px).abs() < 10.0 {
+                return HitTarget::PageDot(i);
+            }
+        }
+    }
+
+    match current_page {
+        PageId::Music => {
+            let ctrl_cy = y0 + 116.0;
+            if (y - ctrl_cy).abs() < 24.0 {
+                if (x - center_x).abs() < 24.0 {
+                    return HitTarget::MediaPlayPause;
+                } else if (x - (center_x - 56.0)).abs() < 18.0 {
+                    return HitTarget::MediaPrev;
+                } else if (x - (center_x + 56.0)).abs() < 18.0 {
+                    return HitTarget::MediaNext;
+                }
+            } else if (y - (y0 + 84.0)).abs() < 10.0 {
+                return HitTarget::Scrubber;
+            }
+        }
+        PageId::Pomodoro => {
+            if y >= y0 + 70.0 && y <= y0 + 98.0 {
+                let pill_w = 78.0;
+                let spacing = 8.0;
+                let total_w = 3.0 * pill_w + 2.0 * spacing;
+                let start_x = x0 + (cur_w - total_w) * 0.5;
+                for i in 0..3 {
+                    let px = start_x + (i as f32) * (pill_w + spacing);
+                    if x >= px && x <= px + pill_w {
+                        return HitTarget::PomoMode(i);
+                    }
+                }
+            } else if y >= y0 + 100.0 && y <= y0 + 130.0 {
+                if x >= center_x - 52.0 && x <= center_x + 20.0 {
+                    return HitTarget::PomoStart;
+                } else if x >= center_x + 28.0 && x <= center_x + 80.0 {
+                    return HitTarget::PomoReset;
+                }
+            }
+        }
+        PageId::Water => {
+            if y >= y0 + 92.0 && y <= y0 + 124.0 {
+                if x >= x0 + 75.0 && x <= x0 + 151.0 {
+                    return HitTarget::WaterAdd250;
+                } else if x >= x0 + 160.0 && x <= x0 + 236.0 {
+                    return HitTarget::WaterAdd500;
+                } else if x >= x0 + 245.0 && x <= x0 + 305.0 {
+                    return HitTarget::WaterReset;
+                }
+            }
+        }
+        PageId::Todo => {
+            for i in 0..3 {
+                let row_y = y0 + 36.0 + (i as f32) * 28.0;
+                if y >= row_y - 2.0 && y <= row_y + 24.0 {
+                    return HitTarget::TaskItem(i);
+                }
+            }
+        }
+        PageId::Shelf => {
+            for i in 0..2 {
+                let card_y = y0 + 38.0 + (i as f32) * 38.0;
+                if y >= card_y && y <= card_y + 34.0 {
+                    return HitTarget::ShelfOpen(i);
+                }
+            }
+        }
+    }
+
+    HitTarget::None
+}
+
 unsafe extern "system" fn wndproc(
     hwnd: HWND,
     msg: u32,
@@ -257,26 +353,26 @@ unsafe extern "system" fn wndproc(
     let ctx_ptr = &raw mut CONTEXT;
     match msg {
         WM_MOUSEMOVE => {
-            let x = (lparam.0 & 0xFFFF) as i16 as i32;
-            let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+            let x = (lparam.0 & 0xFFFF) as i16 as f32;
+            let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as f32;
 
             if let Some(ctx) = (*ctx_ptr).as_mut() {
-                ctx.mouse_x = x;
-                ctx.mouse_y = y;
+                ctx.mouse_x = x as i32;
+                ctx.mouse_y = y as i32;
 
                 let center_x = (CANVAS_WIDTH as f32) * 0.5;
-                ctx.mascot.update_gaze((x as f32) - center_x, (y as f32) - 18.0);
+                ctx.mascot.update_gaze(x - center_x, y - 18.0);
 
                 let cur_w = ctx.width_spring.current;
                 let cur_h = ctx.height_spring.current;
+                let is_flat_top = ctx.settings.mode == Mode::Notch;
                 let x0 = center_x - cur_w * 0.5;
-                let y0 = 10.0;
+                let y0 = if is_flat_top { 0.0 } else { 10.0 };
 
-                // Sensitive hit area: covers top bezel y >= 0 down to island base + margin
-                let inside_island = (x as f32) >= (x0 - 6.0)
-                    && (x as f32) <= (x0 + cur_w + 6.0)
-                    && (y as f32) >= 0.0
-                    && (y as f32) <= (y0 + cur_h + 8.0);
+                let inside_island = x >= (x0 - 6.0)
+                    && x <= (x0 + cur_w + 6.0)
+                    && y >= 0.0
+                    && y <= (y0 + cur_h + 8.0);
 
                 if inside_island {
                     if !ctx.is_hovered {
@@ -295,8 +391,22 @@ unsafe extern "system" fn wndproc(
                             SetTimer(hwnd, TIMER_ANIMATION, 16, None);
                         }
                     }
-                } else if ctx.is_hovered {
+
+                    if ctx.pager.is_dragging() {
+                        if ctx.pager.drag(x) {
+                            ctx.hovered_hit = HitTarget::None;
+                            update_window_surface();
+                        }
+                    } else {
+                        let hit = hit_test(x, y, x0, y0, cur_w, cur_h, ctx.page_state.current_page);
+                        if hit != ctx.hovered_hit {
+                            ctx.hovered_hit = hit;
+                            update_window_surface();
+                        }
+                    }
+                } else if ctx.is_hovered && !ctx.pager.is_dragging() {
                     ctx.is_hovered = false;
+                    ctx.hovered_hit = HitTarget::None;
                     ctx.width_spring.set_target(COMPACT_WIDTH);
                     ctx.height_spring.set_target(COMPACT_HEIGHT);
 
@@ -311,154 +421,157 @@ unsafe extern "system" fn wndproc(
 
         WIN_WM_MOUSELEAVE => {
             if let Some(ctx) = (*ctx_ptr).as_mut() {
-                ctx.is_hovered = false;
-                ctx.width_spring.set_target(COMPACT_WIDTH);
-                ctx.height_spring.set_target(COMPACT_HEIGHT);
+                if !ctx.pager.is_dragging() {
+                    ctx.is_hovered = false;
+                    ctx.hovered_hit = HitTarget::None;
+                    ctx.width_spring.set_target(COMPACT_WIDTH);
+                    ctx.height_spring.set_target(COMPACT_HEIGHT);
 
-                if !ctx.is_animating {
-                    ctx.is_animating = true;
-                    SetTimer(hwnd, TIMER_ANIMATION, 16, None);
+                    if !ctx.is_animating {
+                        ctx.is_animating = true;
+                        SetTimer(hwnd, TIMER_ANIMATION, 16, None);
+                    }
                 }
             }
             LRESULT(0)
         }
 
         WM_LBUTTONDOWN => {
-            let x = (lparam.0 & 0xFFFF) as i16 as i32;
-            let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+            let x = (lparam.0 & 0xFFFF) as i16 as f32;
+            let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as f32;
 
             if let Some(ctx) = (*ctx_ptr).as_mut() {
                 let expand_t = ((ctx.width_spring.current - COMPACT_WIDTH) / (EXPANDED_WIDTH - COMPACT_WIDTH)).clamp(0.0, 1.0);
                 if expand_t > 0.7 {
-                    let cur_h = ctx.height_spring.current;
                     let cur_w = ctx.width_spring.current;
-                    let y0 = 10.0;
-                    let center_x = (CANVAS_WIDTH as f32) * 0.5;
-                    let x0 = center_x - cur_w * 0.5;
+                    let cur_h = ctx.height_spring.current;
+                    let is_flat_top = ctx.settings.mode == Mode::Notch;
+                    let x0 = ((CANVAS_WIDTH as f32) - cur_w) * 0.5;
+                    let y0 = if is_flat_top { 0.0 } else { 10.0 };
 
-                    // 1. Check Bottom Page Indicator Dots
-                    let dot_y = y0 + cur_h - 12.0;
-                    if ((y as f32) - dot_y).abs() < 12.0 {
-                        let dots_count = PageId::ALL.len();
-                        let spacing = 14.0;
-                        let start_x = center_x - ((dots_count as f32 - 1.0) * spacing) * 0.5;
-                        let mut clicked_dot = false;
-                        for (i, p) in PageId::ALL.iter().enumerate() {
-                            let px = start_x + (i as f32) * spacing;
-                            if ((x as f32) - px).abs() < 10.0 {
-                                ctx.page_state.current_page = *p;
-                                clicked_dot = true;
-                                break;
-                            }
-                        }
-                        if !clicked_dot {
-                            if (x as f32) < center_x {
-                                ctx.page_state.current_page = ctx.page_state.current_page.prev();
-                            } else {
-                                ctx.page_state.current_page = ctx.page_state.current_page.next();
-                            }
+                    ctx.press_hit = hit_test(x, y, x0, y0, cur_w, cur_h, ctx.page_state.current_page);
+                    ctx.pager.press(x);
+                    let _ = SetCapture(hwnd);
+                }
+            }
+            LRESULT(0)
+        }
+
+        WM_LBUTTONUP => {
+            let x = (lparam.0 & 0xFFFF) as i16 as f32;
+            let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as f32;
+            let _ = ReleaseCapture();
+
+            if let Some(ctx) = (*ctx_ptr).as_mut() {
+                let cur_w = ctx.width_spring.current;
+                let cur_h = ctx.height_spring.current;
+                let is_flat_top = ctx.settings.mode == Mode::Notch;
+                let x0 = ((CANVAS_WIDTH as f32) - cur_w) * 0.5;
+                let y0 = if is_flat_top { 0.0 } else { 10.0 };
+
+                let release_hit = hit_test(x, y, x0, y0, cur_w, cur_h, ctx.page_state.current_page);
+
+                match ctx.pager.release() {
+                    Release::Swiped { to, .. } => {
+                        ctx.page_state.current_page = PageId::from_index(to);
+                        if !ctx.is_animating {
+                            ctx.is_animating = true;
+                            SetTimer(hwnd, TIMER_ANIMATION, 16, None);
                         }
                         update_window_surface();
-                        return LRESULT(0);
                     }
-
-                    // 2. Page Specific Interactive Clicks
-                    match ctx.page_state.current_page {
-                        PageId::Music => {
-                            let ctrl_cy = y0 + 116.0;
-                            if ((y as f32) - ctrl_cy).abs() < 24.0 {
-                                // Play / Pause
-                                if ((x as f32) - center_x).abs() < 24.0 {
+                    Release::Click => {
+                        if release_hit != HitTarget::None && release_hit == ctx.press_hit {
+                            match release_hit {
+                                HitTarget::PageDot(i) => {
+                                    ctx.page_state.current_page = PageId::from_index(i);
+                                    ctx.pager.jump_to(i);
+                                    update_window_surface();
+                                }
+                                HitTarget::MediaPlayPause => {
+                                    ctx.media_hook.send(MediaCmd::PlayPause);
                                     ctx.page_state.is_playing = !ctx.page_state.is_playing;
-                                    send_media_key(VK_MEDIA_PLAY_PAUSE);
                                     update_window_surface();
                                 }
-                                // Prev
-                                else if ((x as f32) - (center_x - 56.0)).abs() < 18.0 {
-                                    send_media_key(VK_MEDIA_PREV_TRACK);
-                                    ctx.page_state.track_progress = (ctx.page_state.track_progress - 0.1).max(0.0);
+                                HitTarget::MediaPrev => {
+                                    ctx.media_hook.send(MediaCmd::Prev);
+                                }
+                                HitTarget::MediaNext => {
+                                    ctx.media_hook.send(MediaCmd::Next);
+                                }
+                                HitTarget::Scrubber => {
+                                    let bar_x = x0 + 20.0;
+                                    let bar_w = cur_w - 40.0;
+                                    let ratio = ((x - bar_x) / bar_w).clamp(0.0, 1.0);
+                                    ctx.page_state.track_progress = ratio;
                                     update_window_surface();
                                 }
-                                // Next
-                                else if ((x as f32) - (center_x + 56.0)).abs() < 18.0 {
-                                    send_media_key(VK_MEDIA_NEXT_TRACK);
-                                    ctx.page_state.track_progress = (ctx.page_state.track_progress + 0.1).min(1.0);
+                                HitTarget::PomoMode(i) => {
+                                    ctx.page_state.set_pomo_mode(i);
                                     update_window_surface();
                                 }
-                            } else if ((y as f32) - (y0 + 84.0)).abs() < 10.0 {
-                                // Scrubber bar clicked
-                                let bar_x = x0 + 20.0;
-                                let bar_w = cur_w - 40.0;
-                                let ratio = (((x as f32) - bar_x) / bar_w).clamp(0.0, 1.0);
-                                ctx.page_state.track_progress = ratio;
-                                update_window_surface();
-                            }
-                        }
-                        PageId::Pomodoro => {
-                            // Mode Pills at y0 + 74
-                            if (y as f32) >= y0 + 70.0 && (y as f32) <= y0 + 98.0 {
-                                let pill_w = 78.0;
-                                let spacing = 8.0;
-                                let total_w = 3.0 * pill_w + 2.0 * spacing;
-                                let start_x = x0 + (cur_w - total_w) * 0.5;
-                                for i in 0..3 {
-                                    let px = start_x + (i as f32) * (pill_w + spacing);
-                                    if (x as f32) >= px && (x as f32) <= px + pill_w {
-                                        ctx.page_state.set_pomo_mode(i);
-                                        update_window_surface();
-                                        break;
-                                    }
-                                }
-                            }
-                            // Action Buttons at y0 + 104
-                            else if (y as f32) >= y0 + 100.0 && (y as f32) <= y0 + 130.0 {
-                                if (x as f32) >= center_x - 52.0 && (x as f32) <= center_x + 20.0 {
+                                HitTarget::PomoStart => {
                                     ctx.page_state.toggle_pomo();
                                     update_window_surface();
-                                } else if (x as f32) >= center_x + 28.0 && (x as f32) <= center_x + 80.0 {
+                                }
+                                HitTarget::PomoReset => {
                                     ctx.page_state.reset_pomo();
                                     update_window_surface();
                                 }
-                            }
-                        }
-                        PageId::Water => {
-                            // Buttons at y0 + 96
-                            if (y as f32) >= y0 + 92.0 && (y as f32) <= y0 + 124.0 {
-                                if (x as f32) >= x0 + 75.0 && (x as f32) <= x0 + 151.0 {
+                                HitTarget::WaterAdd250 => {
                                     ctx.page_state.add_water(250);
                                     update_window_surface();
-                                } else if (x as f32) >= x0 + 160.0 && (x as f32) <= x0 + 236.0 {
+                                }
+                                HitTarget::WaterAdd500 => {
                                     ctx.page_state.add_water(500);
                                     update_window_surface();
-                                } else if (x as f32) >= x0 + 245.0 && (x as f32) <= x0 + 305.0 {
+                                }
+                                HitTarget::WaterReset => {
                                     ctx.page_state.reset_water();
                                     update_window_surface();
                                 }
-                            }
-                        }
-                        PageId::Todo => {
-                            // Tasks at y0 + 36 + i * 28
-                            for i in 0..ctx.page_state.tasks.len().min(3) {
-                                let row_y = y0 + 36.0 + (i as f32) * 28.0;
-                                if (y as f32) >= row_y - 2.0 && (y as f32) <= row_y + 24.0 {
+                                HitTarget::TaskItem(i) => {
                                     ctx.page_state.toggle_task(i);
                                     update_window_surface();
-                                    break;
                                 }
-                            }
-                        }
-                        PageId::Shelf => {
-                            // Shelf cards at y0 + 38 + i * 38
-                            for i in 0..ctx.page_state.shelf_items.len().min(2) {
-                                let card_y = y0 + 38.0 + (i as f32) * 38.0;
-                                if (y as f32) >= card_y && (y as f32) <= card_y + 34.0 {
+                                HitTarget::ShelfOpen(_) => {
                                     let _ = std::process::Command::new("explorer").arg(r"D:\Downloads").spawn();
-                                    break;
                                 }
+                                _ => {}
                             }
                         }
                     }
                 }
+                ctx.press_hit = HitTarget::None;
+            }
+            LRESULT(0)
+        }
+
+        WM_RBUTTONUP => {
+            if let Some(ctx) = (*ctx_ptr).as_mut() {
+                if let Some(cmd) = show_tray_menu(hwnd, &ctx.settings, Settings::monitor_count()) {
+                    handle_tray_cmd(ctx, cmd);
+                }
+            }
+            LRESULT(0)
+        }
+
+        WM_TRAY => {
+            let ev = (lparam.0 as u32) & 0xFFFF;
+            if ev == WM_RBUTTONUP || ev == WM_CONTEXTMENU {
+                if let Some(ctx) = (*ctx_ptr).as_mut() {
+                    if let Some(cmd) = show_tray_menu(hwnd, &ctx.settings, Settings::monitor_count()) {
+                        handle_tray_cmd(ctx, cmd);
+                    }
+                }
+            }
+            LRESULT(0)
+        }
+
+        WM_MEDIA_CHANGED => {
+            if let Some(ctx) = (*ctx_ptr).as_mut() {
+                ctx.media = ctx.media_hook.snapshot();
+                update_window_surface();
             }
             LRESULT(0)
         }
@@ -467,12 +580,18 @@ unsafe extern "system" fn wndproc(
             let timer_id = wparam.0;
             if timer_id == TIMER_ANIMATION {
                 if let Some(ctx) = (*ctx_ptr).as_mut() {
-                    let dt = 0.016; // 60 FPS step
+                    let dt = 0.016;
                     let w_moving = ctx.width_spring.update(dt);
                     let h_moving = ctx.height_spring.update(dt);
+                    let pager_moving = ctx.pager.tick(dt);
 
-                    // Dynamic equalizer bounce while playing
-                    if ctx.page_state.is_playing {
+                    let is_playing = if ctx.media.has_session {
+                        ctx.media.playing
+                    } else {
+                        ctx.page_state.is_playing
+                    };
+
+                    if is_playing {
                         for bar in &mut ctx.page_state.eq_bars {
                             *bar = (*bar + 0.12) % 1.0;
                         }
@@ -480,8 +599,8 @@ unsafe extern "system" fn wndproc(
 
                     update_window_surface();
 
-                    // Zero-Idle: If both springs have settled, kill animation timer
-                    if !w_moving && !h_moving {
+                    // Zero-Idle: kill timer if all springs settled and music not actively playing
+                    if !w_moving && !h_moving && !pager_moving && (!is_playing || !ctx.is_hovered) {
                         ctx.is_animating = false;
                         let _ = KillTimer(hwnd, TIMER_ANIMATION);
                     }
@@ -490,7 +609,6 @@ unsafe extern "system" fn wndproc(
                 if let Some(ctx) = (*ctx_ptr).as_mut() {
                     let need_redraw = ctx.mascot.update_blink(0.1);
 
-                    // Second-ticking for pomodoro
                     ctx.tick_counter += 1;
                     let mut pomo_tick = false;
                     if ctx.tick_counter % 10 == 0 {
@@ -514,6 +632,7 @@ unsafe extern "system" fn wndproc(
         }
 
         WM_DESTROY => {
+            remove_tray_icon(hwnd);
             let _ = KillTimer(hwnd, TIMER_ANIMATION);
             let _ = KillTimer(hwnd, TIMER_MASCOT_BLINK);
             PostQuitMessage(0);
@@ -521,5 +640,35 @@ unsafe extern "system" fn wndproc(
         }
 
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
+}
+
+fn handle_tray_cmd(ctx: &mut WindowContext, cmd: TrayCmd) {
+    match cmd {
+        TrayCmd::Mode(m) => {
+            ctx.settings.mode = m;
+            ctx.settings.save();
+            let (x, y) = ctx.settings.anchor(CANVAS_WIDTH, 10);
+            unsafe {
+                let _ = SetWindowPos(ctx.hwnd, HWND_TOPMOST, x, y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
+            }
+            unsafe { update_window_surface(); }
+        }
+        TrayCmd::Monitor(mon) => {
+            ctx.settings.monitor = mon;
+            ctx.settings.save();
+            let (x, y) = ctx.settings.anchor(CANVAS_WIDTH, 10);
+            unsafe {
+                let _ = SetWindowPos(ctx.hwnd, HWND_TOPMOST, x, y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
+            }
+            unsafe { update_window_surface(); }
+        }
+        TrayCmd::ToggleStartup => {
+            let on = !ctx.settings.autostart;
+            ctx.settings.set_autostart(on);
+        }
+        TrayCmd::Quit => unsafe {
+            let _ = DestroyWindow(ctx.hwnd);
+        },
     }
 }

@@ -8,6 +8,7 @@ use crate::theme::*;
 use crate::spring::*;
 use crate::mascot::*;
 use crate::pages::*;
+use crate::media::MediaSnapshot;
 
 pub struct Surface {
     pub width: i32,
@@ -65,7 +66,7 @@ impl Surface {
     }
 
     /// Fill an anti-aliased rounded rectangle (Apple Squircle approximation)
-    pub fn fill_rounded_rect(&mut self, x0: f32, y0: f32, w: f32, h: f32, r: f32, color: u32) {
+    pub fn fill_rounded_rect(&mut self, x0: f32, y0: f32, w: f32, h: f32, r: f32, color: u32, flat_top: bool) {
         let min_x = (x0 - 1.0).max(0.0) as i32;
         let max_x = (x0 + w + 1.0).min(self.width as f32) as i32;
         let min_y = (y0 - 1.0).max(0.0) as i32;
@@ -79,7 +80,7 @@ impl Surface {
         let effective_r = r.min(w * 0.5).min(h * 0.5);
         let cx_left = x0 + effective_r;
         let cx_right = x0 + w - effective_r;
-        let cy_top = y0 + effective_r;
+        let cy_top = if flat_top { y0 } else { y0 + effective_r };
         let cy_bottom = y0 + h - effective_r;
 
         for y in min_y..max_y {
@@ -95,7 +96,7 @@ impl Surface {
                     0.0
                 };
 
-                let dy = if py < cy_top {
+                let dy = if !flat_top && py < cy_top {
                     cy_top - py
                 } else if py > cy_bottom {
                     py - cy_bottom
@@ -119,7 +120,7 @@ impl Surface {
     }
 
     /// Stroke an anti-aliased rounded rectangle border (Apple specular outline)
-    pub fn stroke_rounded_rect(&mut self, x0: f32, y0: f32, w: f32, h: f32, r: f32, thickness: f32, color: u32) {
+    pub fn stroke_rounded_rect(&mut self, x0: f32, y0: f32, w: f32, h: f32, r: f32, thickness: f32, color: u32, flat_top: bool) {
         let min_x = (x0 - thickness - 1.0).max(0.0) as i32;
         let max_x = (x0 + w + thickness + 1.0).min(self.width as f32) as i32;
         let min_y = (y0 - thickness - 1.0).max(0.0) as i32;
@@ -133,7 +134,7 @@ impl Surface {
         let effective_r = r.min(w * 0.5).min(h * 0.5);
         let cx_left = x0 + effective_r;
         let cx_right = x0 + w - effective_r;
-        let cy_top = y0 + effective_r;
+        let cy_top = if flat_top { y0 } else { y0 + effective_r };
         let cy_bottom = y0 + h - effective_r;
 
         let half_t = thickness * 0.5;
@@ -151,7 +152,7 @@ impl Surface {
                     0.0
                 };
 
-                let dy = if py < cy_top {
+                let dy = if !flat_top && py < cy_top {
                     cy_top - py
                 } else if py > cy_bottom {
                     py - cy_bottom
@@ -176,11 +177,87 @@ impl Surface {
     }
 
     pub fn fill_circle(&mut self, cx: f32, cy: f32, r: f32, color: u32) {
-        self.fill_rounded_rect(cx - r, cy - r, r * 2.0, r * 2.0, r, color);
+        self.fill_rounded_rect(cx - r, cy - r, r * 2.0, r * 2.0, r, color, false);
     }
 
     pub fn stroke_circle(&mut self, cx: f32, cy: f32, r: f32, thickness: f32, color: u32) {
-        self.stroke_rounded_rect(cx - r, cy - r, r * 2.0, r * 2.0, r, thickness, color);
+        self.stroke_rounded_rect(cx - r, cy - r, r * 2.0, r * 2.0, r, thickness, color, false);
+    }
+
+    /// Apple Specular Top Highlight Pass (1.5px subtle top sheen)
+    pub fn specular_top_pass(&mut self, x0: f32, y0: f32, w: f32, radius: f32, strength: f32) {
+        let cx = x0 + w * 0.5;
+        let y_start = (y0 - 1.0).max(0.0) as i32;
+        let y_end = ((y0 + radius * 1.5).ceil() as i32).min(self.height);
+        let x_start = (x0 - 1.0).max(0.0) as i32;
+        let x_end = ((x0 + w + 1.0).ceil() as i32).min(self.width);
+
+        for y in y_start..y_end {
+            let py = y as f32 + 0.5;
+            let fall = (1.0 - (py - y0) / (radius * 1.5)).clamp(0.0, 1.0);
+            if fall <= 0.0 {
+                continue;
+            }
+            let fall2 = fall * fall;
+
+            for x in x_start..x_end {
+                let px = x as f32 + 0.5;
+                let nx = ((px - cx) / (w * 0.5 * 0.85)).abs();
+                if nx > 1.0 {
+                    continue;
+                }
+                let horiz = (1.0 - nx * nx).powi(2);
+                let a = horiz * fall2 * strength;
+                if a <= 0.002 {
+                    continue;
+                }
+
+                let alpha_u = (a * 255.0).round() as u32;
+                let white_premul = (alpha_u << 24) | (alpha_u << 16) | (alpha_u << 8) | alpha_u;
+                self.blend_pixel(x, y, white_premul);
+            }
+        }
+    }
+
+    /// Blit decoded album art with rounded corner mask
+    pub fn blit_album_art(&mut self, dst_x: i32, dst_y: i32, art: &[u8], art_dim: u32, radius: f32) {
+        let half = art_dim as f32 * 0.5;
+        let cx = dst_x as f32 + half;
+        let cy = dst_y as f32 + half;
+
+        for sy in 0..art_dim as i32 {
+            let dy = dst_y + sy;
+            if dy < 0 || dy >= self.height {
+                continue;
+            }
+
+            for sx in 0..art_dim as i32 {
+                let dx = dst_x + sx;
+                if dx < 0 || dx >= self.width {
+                    continue;
+                }
+
+                let rel_x = (dx as f32 + 0.5 - cx).abs();
+                let rel_y = (dy as f32 + 0.5 - cy).abs();
+                let qx = (rel_x - (half - radius)).max(0.0);
+                let qy = (rel_y - (half - radius)).max(0.0);
+                let dist = (qx * qx + qy * qy).sqrt();
+                let cov = (radius + 0.5 - dist).clamp(0.0, 1.0);
+                if cov <= 0.01 {
+                    continue;
+                }
+
+                let src_idx = ((sy * art_dim as i32 + sx) * 4) as usize;
+                if src_idx + 3 < art.len() {
+                    let b = (art[src_idx] as f32 * cov) as u32;
+                    let g = (art[src_idx + 1] as f32 * cov) as u32;
+                    let r = (art[src_idx + 2] as f32 * cov) as u32;
+                    let a = (art[src_idx + 3] as f32 * cov) as u32;
+                    let premul = (a << 24) | (r << 16) | (g << 8) | b;
+                    self.blend_pixel(dx, dy, premul);
+                }
+            }
+        }
     }
 }
 
@@ -188,20 +265,21 @@ pub fn render_apple_island(
     surface: &mut Surface,
     width_spring: &Spring,
     height_spring: &Spring,
-    expand_t: f32, // 0.0 = compact pill, 1.0 = expanded card
+    expand_t: f32,
     mascot: &Mascot,
     page_state: &PageState,
+    media: &MediaSnapshot,
+    flat_top: bool,
+    hovered: HitTarget,
 ) {
     surface.clear();
 
     let cur_w = width_spring.current;
     let cur_h = height_spring.current;
 
-    // Pinned horizontally centered, floating 10px from screen top
     let x0 = ((CANVAS_WIDTH as f32) - cur_w) * 0.5;
-    let y0 = 10.0;
+    let y0 = if flat_top { 0.0 } else { 10.0 };
 
-    // Continuous radius: 18px (pill) up to 42px (expanded card)
     let radius = COMPACT_RADIUS + (EXPANDED_RADIUS - COMPACT_RADIUS) * expand_t;
 
     // 1. Soft Ambient Drop Shadow under island
@@ -214,10 +292,11 @@ pub fn render_apple_island(
         cur_h + shadow_spread,
         radius + shadow_spread * 0.5,
         fade_color(COLOR_ISLAND_SHADOW, 0.4 + 0.4 * expand_t),
+        flat_top,
     );
 
     // 2. Main Apple OLED True Black Body
-    surface.fill_rounded_rect(x0, y0, cur_w, cur_h, radius, COLOR_ISLAND_BLACK);
+    surface.fill_rounded_rect(x0, y0, cur_w, cur_h, radius, COLOR_ISLAND_BLACK, flat_top);
 
     // 3. Apple Specular Glass Border (Subtle white rim light)
     surface.stroke_rounded_rect(
@@ -228,13 +307,18 @@ pub fn render_apple_island(
         radius,
         1.0,
         COLOR_ISLAND_BORDER,
+        flat_top,
     );
+
+    // 4. Apple Specular Top Highlight Sheen (only in floating mode)
+    if !flat_top {
+        surface.specular_top_pass(x0, y0, cur_w, radius, 0.28);
+    }
 
     // RENDER COMPACT PILL STATE (< 0.7 expansion)
     if expand_t < 0.7 {
         let alpha = (1.0 - expand_t / 0.7).clamp(0.0, 1.0);
 
-        // Leading View: Mini Album Art / Icon (Left side)
         let lead_x = x0 + 10.0;
         let lead_y = y0 + 8.0;
         let lead_s = 20.0;
@@ -242,22 +326,26 @@ pub fn render_apple_island(
 
         match page_state.current_page {
             PageId::Music => {
-                surface.fill_rounded_rect(lead_x, lead_y, lead_s, lead_s, lead_r, fade_color(0xFF1E1B4B, alpha));
-                surface.fill_circle(lead_x + 10.0, lead_y + 10.0, 4.0, fade_color(APPLE_CYAN, alpha));
+                if let Some(ref art) = media.art {
+                    surface.blit_album_art(lead_x as i32, lead_y as i32, &art.bgra_premul, art.size, lead_r);
+                } else {
+                    surface.fill_rounded_rect(lead_x, lead_y, lead_s, lead_s, lead_r, fade_color(0xFF1E1B4B, alpha), false);
+                    surface.fill_circle(lead_x + 10.0, lead_y + 10.0, 4.0, fade_color(APPLE_CYAN, alpha));
+                }
             }
             PageId::Pomodoro => {
                 surface.fill_circle(lead_x + 10.0, lead_y + 10.0, 9.0, fade_color(APPLE_ORANGE, alpha));
                 surface.fill_circle(lead_x + 10.0, lead_y + 10.0, 5.0, fade_color(COLOR_ISLAND_BLACK, alpha));
             }
             PageId::Water => {
-                surface.fill_rounded_rect(lead_x + 3.0, lead_y + 2.0, 14.0, 16.0, 4.0, fade_color(APPLE_CYAN, alpha));
+                surface.fill_rounded_rect(lead_x + 3.0, lead_y + 2.0, 14.0, 16.0, 4.0, fade_color(APPLE_CYAN, alpha), false);
             }
             PageId::Todo => {
                 surface.fill_circle(lead_x + 10.0, lead_y + 10.0, 8.0, fade_color(APPLE_BLUE, alpha));
                 render_check_icon(surface, lead_x + 10.0, lead_y + 10.0, fade_color(COLOR_TEXT_WHITE, alpha));
             }
             PageId::Shelf => {
-                surface.fill_rounded_rect(lead_x + 2.0, lead_y + 3.0, 16.0, 14.0, 3.0, fade_color(APPLE_PURPLE, alpha));
+                surface.fill_rounded_rect(lead_x + 2.0, lead_y + 3.0, 16.0, 14.0, 3.0, fade_color(APPLE_PURPLE, alpha), false);
             }
         }
 
@@ -266,15 +354,17 @@ pub fn render_apple_island(
         let mascot_cy = y0 + cur_h * 0.5;
         render_mascot_eyes(surface, mascot_cx, mascot_cy, mascot, alpha);
 
-        // Trailing View: Apple signature bouncing audio waveform
+        // Trailing View: Equalizer Waveform
         let wave_right = x0 + cur_w - 12.0;
         let wave_cy = y0 + cur_h * 0.5;
+        let is_playing = if media.has_session { media.playing } else { page_state.is_playing };
+
         for i in 0..4 {
             let bx = wave_right - ((3 - i) as f32 * 4.5);
             let bar_h = 4.0 + page_state.eq_bars[i] * 14.0;
             let by = wave_cy - bar_h * 0.5;
-            let wave_col = if page_state.is_playing { APPLE_ORANGE } else { COLOR_TEXT_TERTIARY };
-            surface.fill_rounded_rect(bx, by, 2.5, bar_h, 1.25, fade_color(wave_col, alpha));
+            let wave_col = if is_playing { APPLE_ORANGE } else { COLOR_TEXT_TERTIARY };
+            surface.fill_rounded_rect(bx, by, 2.5, bar_h, 1.25, fade_color(wave_col, alpha), false);
         }
     }
 
@@ -289,22 +379,21 @@ pub fn render_apple_island(
         let mascot_cy = head_y + 8.0;
         render_mascot_eyes(surface, mascot_cx, mascot_cy, mascot, alpha);
 
-        // Render Active Page Content
         match page_state.current_page {
             PageId::Music => {
-                render_expanded_music(surface, x0, y0, cur_w, alpha, page_state);
+                render_expanded_music(surface, x0, y0, cur_w, alpha, page_state, media, hovered);
             }
             PageId::Pomodoro => {
-                render_expanded_pomodoro(surface, x0, y0, cur_w, alpha, page_state);
+                render_expanded_pomodoro(surface, x0, y0, cur_w, alpha, page_state, hovered);
             }
             PageId::Water => {
-                render_expanded_water(surface, x0, y0, cur_w, alpha, page_state);
+                render_expanded_water(surface, x0, y0, cur_w, alpha, page_state, hovered);
             }
             PageId::Todo => {
-                render_expanded_todo(surface, x0, y0, cur_w, alpha, page_state);
+                render_expanded_todo(surface, x0, y0, cur_w, alpha, page_state, hovered);
             }
             PageId::Shelf => {
-                render_expanded_shelf(surface, x0, y0, cur_w, alpha, page_state);
+                render_expanded_shelf(surface, x0, y0, cur_w, alpha, page_state, hovered);
             }
         }
 
@@ -317,9 +406,12 @@ pub fn render_apple_island(
         for (i, p) in PageId::ALL.iter().enumerate() {
             let px = start_x + (i as f32) * spacing;
             let is_active = *p == page_state.current_page;
+            let is_dot_hover = hovered == HitTarget::PageDot(i);
+
             if is_active {
-                // Active expanded pill
-                surface.fill_rounded_rect(px - 6.0, pill_y - 2.0, 12.0, 4.0, 2.0, fade_color(COLOR_TEXT_WHITE, alpha));
+                surface.fill_rounded_rect(px - 6.0, pill_y - 2.0, 12.0, 4.0, 2.0, fade_color(COLOR_TEXT_WHITE, alpha), false);
+            } else if is_dot_hover {
+                surface.fill_circle(px, pill_y, 3.0, fade_color(COLOR_TEXT_WHITE, alpha * 0.8));
             } else {
                 surface.fill_circle(px, pill_y, 2.0, fade_color(COLOR_TEXT_TERTIARY, alpha));
             }
@@ -327,66 +419,91 @@ pub fn render_apple_island(
     }
 }
 
-fn render_expanded_music(surface: &mut Surface, x0: f32, y0: f32, cur_w: f32, alpha: f32, page_state: &PageState) {
+fn render_expanded_music(
+    surface: &mut Surface,
+    x0: f32,
+    y0: f32,
+    cur_w: f32,
+    alpha: f32,
+    page_state: &PageState,
+    media: &MediaSnapshot,
+    hovered: HitTarget,
+) {
     let head_y = y0 + 16.0;
 
-    // Large 52x52 Album Artwork on Left
+    // Album Artwork on Left
     let art_x = x0 + 18.0;
     let art_s = 52.0;
     let art_r = 12.0;
-    surface.fill_rounded_rect(art_x, head_y + 2.0, art_s, art_s, art_r, fade_color(0x55000000, alpha));
-    surface.fill_rounded_rect(art_x, head_y, art_s, art_s, art_r, fade_color(0xFF1E1B4B, alpha));
-    surface.stroke_rounded_rect(art_x, head_y, art_s, art_s, art_r, 1.0, fade_color(0x33FFFFFF, alpha));
-    // Vinyl groove
-    surface.fill_circle(art_x + 26.0, head_y + 26.0, 18.0, fade_color(0xFF0F0F12, alpha));
-    surface.fill_circle(art_x + 26.0, head_y + 26.0, 6.0, fade_color(APPLE_CYAN, alpha));
+    surface.fill_rounded_rect(art_x, head_y + 2.0, art_s, art_s, art_r, fade_color(0x55000000, alpha), false);
+
+    if let Some(ref art) = media.art {
+        surface.blit_album_art(art_x as i32, head_y as i32, &art.bgra_premul, art.size, art_r);
+        surface.stroke_rounded_rect(art_x, head_y, art_s, art_s, art_r, 1.0, fade_color(0x33FFFFFF, alpha), false);
+    } else {
+        surface.fill_rounded_rect(art_x, head_y, art_s, art_s, art_r, fade_color(0xFF1E1B4B, alpha), false);
+        surface.stroke_rounded_rect(art_x, head_y, art_s, art_s, art_r, 1.0, fade_color(0x33FFFFFF, alpha), false);
+        surface.fill_circle(art_x + 26.0, head_y + 26.0, 18.0, fade_color(0xFF0F0F12, alpha));
+        surface.fill_circle(art_x + 26.0, head_y + 26.0, 6.0, fade_color(APPLE_CYAN, alpha));
+    }
 
     // Right side: Equalizer Waveform
     let wave_right = x0 + cur_w - 22.0;
+    let is_playing = if media.has_session { media.playing } else { page_state.is_playing };
+
     for i in 0..5 {
         let bx = wave_right - ((4 - i) as f32 * 5.0);
         let bar_h = 5.0 + page_state.eq_bars[i] * 20.0;
         let by = (head_y + 26.0) - bar_h * 0.5;
-        surface.fill_rounded_rect(bx, by, 3.0, bar_h, 1.5, fade_color(APPLE_ORANGE, alpha));
+        let col = if is_playing { APPLE_ORANGE } else { COLOR_TEXT_TERTIARY };
+        surface.fill_rounded_rect(bx, by, 3.0, bar_h, 1.5, fade_color(col, alpha), false);
     }
 
-    // Scrubber Progress Bar (y0 + 84)
+    // Scrubber Progress Bar
     let bar_x = x0 + 20.0;
     let bar_y = y0 + 84.0;
     let bar_w = cur_w - 40.0;
     let bar_h = 4.0;
 
-    surface.fill_rounded_rect(bar_x, bar_y, bar_w, bar_h, 2.0, fade_color(COLOR_TRACK_BG, alpha));
-    let fill_w = bar_w * page_state.track_progress;
-    surface.fill_rounded_rect(bar_x, bar_y, fill_w, bar_h, 2.0, fade_color(COLOR_TEXT_WHITE, alpha));
+    let progress = if media.has_session && media.duration_ms > 0 {
+        (media.position_ms_now() as f32 / media.duration_ms as f32).clamp(0.0, 1.0)
+    } else {
+        page_state.track_progress
+    };
+
+    surface.fill_rounded_rect(bar_x, bar_y, bar_w, bar_h, 2.0, fade_color(COLOR_TRACK_BG, alpha), false);
+    let fill_w = bar_w * progress;
+    surface.fill_rounded_rect(bar_x, bar_y, fill_w, bar_h, 2.0, fade_color(COLOR_TEXT_WHITE, alpha), false);
     surface.fill_circle(bar_x + fill_w, bar_y + 2.0, 3.5, fade_color(COLOR_TEXT_WHITE, alpha));
 
-    // Playback Controls (y0 + 116)
+    // Controls
     let ctrl_cy = y0 + 116.0;
     let center_x = x0 + cur_w * 0.5;
 
     // Prev button
-    surface.fill_circle(center_x - 56.0, ctrl_cy, 15.0, fade_color(COLOR_CONTROL_BG, alpha));
+    let prev_bg = if hovered == HitTarget::MediaPrev { COLOR_CONTROL_HOVER } else { COLOR_CONTROL_BG };
+    surface.fill_circle(center_x - 56.0, ctrl_cy, 15.0, fade_color(prev_bg, alpha));
     render_prev_icon(surface, center_x - 56.0, ctrl_cy, fade_color(COLOR_TEXT_WHITE, alpha));
 
     // Play / Pause prominent button
-    surface.fill_circle(center_x, ctrl_cy, 20.0, fade_color(COLOR_TEXT_WHITE, alpha * 0.95));
-    if page_state.is_playing {
-        surface.fill_rounded_rect(center_x - 5.0, ctrl_cy - 7.0, 3.5, 14.0, 1.5, fade_color(COLOR_ISLAND_BLACK, alpha));
-        surface.fill_rounded_rect(center_x + 1.5, ctrl_cy - 7.0, 3.5, 14.0, 1.5, fade_color(COLOR_ISLAND_BLACK, alpha));
+    let play_bg = if hovered == HitTarget::MediaPlayPause { 0xFFFFFFFF } else { fade_color(COLOR_TEXT_WHITE, 0.95) };
+    surface.fill_circle(center_x, ctrl_cy, 20.0, fade_color(play_bg, alpha));
+    if is_playing {
+        surface.fill_rounded_rect(center_x - 5.0, ctrl_cy - 7.0, 3.5, 14.0, 1.5, fade_color(COLOR_ISLAND_BLACK, alpha), false);
+        surface.fill_rounded_rect(center_x + 1.5, ctrl_cy - 7.0, 3.5, 14.0, 1.5, fade_color(COLOR_ISLAND_BLACK, alpha), false);
     } else {
         render_play_icon(surface, center_x + 1.0, ctrl_cy, fade_color(COLOR_ISLAND_BLACK, alpha));
     }
 
     // Next button
-    surface.fill_circle(center_x + 56.0, ctrl_cy, 15.0, fade_color(COLOR_CONTROL_BG, alpha));
+    let next_bg = if hovered == HitTarget::MediaNext { COLOR_CONTROL_HOVER } else { COLOR_CONTROL_BG };
+    surface.fill_circle(center_x + 56.0, ctrl_cy, 15.0, fade_color(next_bg, alpha));
     render_next_icon(surface, center_x + 56.0, ctrl_cy, fade_color(COLOR_TEXT_WHITE, alpha));
 }
 
-fn render_expanded_pomodoro(surface: &mut Surface, x0: f32, y0: f32, cur_w: f32, alpha: f32, page_state: &PageState) {
+fn render_expanded_pomodoro(surface: &mut Surface, x0: f32, y0: f32, cur_w: f32, alpha: f32, page_state: &PageState, hovered: HitTarget) {
     let head_y = y0 + 16.0;
 
-    // Left Circular Timer Ring
     let ring_cx = x0 + 44.0;
     let ring_cy = head_y + 32.0;
     let ring_r = 24.0;
@@ -395,7 +512,7 @@ fn render_expanded_pomodoro(surface: &mut Surface, x0: f32, y0: f32, cur_w: f32,
     surface.stroke_circle(ring_cx, ring_cy, ring_r, 4.0, fade_color(APPLE_ORANGE, alpha));
     surface.fill_circle(ring_cx, ring_cy, 10.0, fade_color(0x33FF9500, alpha));
 
-    // Mode Selector Pills at y0 + 74
+    // Mode Selector Pills
     let mode_y = y0 + 74.0;
     let modes = ["25m Focus", "5m Break", "15m Rest"];
     let pill_w = 78.0;
@@ -406,37 +523,38 @@ fn render_expanded_pomodoro(surface: &mut Surface, x0: f32, y0: f32, cur_w: f32,
     for (i, _) in modes.iter().enumerate() {
         let px = start_x + (i as f32) * (pill_w + spacing);
         let is_selected = i == page_state.pomo_mode;
+        let is_hov = hovered == HitTarget::PomoMode(i);
+
         if is_selected {
-            surface.fill_rounded_rect(px, mode_y, pill_w, 22.0, 11.0, fade_color(0x44FF9500, alpha));
-            surface.stroke_rounded_rect(px, mode_y, pill_w, 22.0, 11.0, 1.0, fade_color(APPLE_ORANGE, alpha));
+            surface.fill_rounded_rect(px, mode_y, pill_w, 22.0, 11.0, fade_color(0x44FF9500, alpha), false);
+            surface.stroke_rounded_rect(px, mode_y, pill_w, 22.0, 11.0, 1.0, fade_color(APPLE_ORANGE, alpha), false);
+        } else if is_hov {
+            surface.fill_rounded_rect(px, mode_y, pill_w, 22.0, 11.0, fade_color(0x33FFFFFF, alpha), false);
         } else {
-            surface.fill_rounded_rect(px, mode_y, pill_w, 22.0, 11.0, fade_color(0x18FFFFFF, alpha));
+            surface.fill_rounded_rect(px, mode_y, pill_w, 22.0, 11.0, fade_color(0x18FFFFFF, alpha), false);
         }
     }
 
-    // Action Buttons at y0 + 104
+    // Action Buttons
     let btn_y = y0 + 104.0;
     let center_x = x0 + cur_w * 0.5;
 
-    // Start / Pause Pill
     let start_col = if page_state.pomo_running { APPLE_ORANGE } else { APPLE_GREEN };
-    surface.fill_rounded_rect(center_x - 52.0, btn_y, 72.0, 24.0, 12.0, fade_color(start_col, alpha));
+    surface.fill_rounded_rect(center_x - 52.0, btn_y, 72.0, 24.0, 12.0, fade_color(start_col, alpha), false);
 
-    // Reset Pill
-    surface.fill_rounded_rect(center_x + 28.0, btn_y, 52.0, 24.0, 12.0, fade_color(0x2AFFFFFF, alpha));
+    let reset_bg = if hovered == HitTarget::PomoReset { COLOR_CONTROL_HOVER } else { 0x2AFFFFFF };
+    surface.fill_rounded_rect(center_x + 28.0, btn_y, 52.0, 24.0, 12.0, fade_color(reset_bg, alpha), false);
 }
 
-fn render_expanded_water(surface: &mut Surface, x0: f32, y0: f32, cur_w: f32, alpha: f32, page_state: &PageState) {
+fn render_expanded_water(surface: &mut Surface, x0: f32, y0: f32, cur_w: f32, alpha: f32, page_state: &PageState, hovered: HitTarget) {
     let head_y = y0 + 16.0;
 
-    // Water Tumbler Outline
     let cup_x = x0 + 26.0;
     let cup_y = head_y + 4.0;
     let cup_w = 34.0;
     let cup_h = 50.0;
-    surface.stroke_rounded_rect(cup_x, cup_y, cup_w, cup_h, 8.0, 2.0, fade_color(COLOR_TRACK_BG, alpha));
+    surface.stroke_rounded_rect(cup_x, cup_y, cup_w, cup_h, 8.0, 2.0, fade_color(COLOR_TRACK_BG, alpha), false);
 
-    // Water Fill Level
     let fill_ratio = (page_state.water_taken_ml as f32 / page_state.water_goal_ml as f32).clamp(0.0, 1.0);
     let fill_h = (cup_h - 4.0) * fill_ratio;
     if fill_h > 2.0 {
@@ -447,38 +565,39 @@ fn render_expanded_water(surface: &mut Surface, x0: f32, y0: f32, cur_w: f32, al
             fill_h,
             6.0,
             fade_color(APPLE_CYAN, alpha * 0.85),
+            false,
         );
     }
 
-    // Progress bar across middle
     let bar_x = x0 + 75.0;
     let bar_y = y0 + 64.0;
     let bar_w = cur_w - 95.0;
-    surface.fill_rounded_rect(bar_x, bar_y, bar_w, 6.0, 3.0, fade_color(COLOR_TRACK_BG, alpha));
+    surface.fill_rounded_rect(bar_x, bar_y, bar_w, 6.0, 3.0, fade_color(COLOR_TRACK_BG, alpha), false);
     let progress_w = bar_w * fill_ratio;
-    surface.fill_rounded_rect(bar_x, bar_y, progress_w, 6.0, 3.0, fade_color(APPLE_CYAN, alpha));
+    surface.fill_rounded_rect(bar_x, bar_y, progress_w, 6.0, 3.0, fade_color(APPLE_CYAN, alpha), false);
 
-    // Quick Action Pill Buttons at y0 + 96
+    // Quick Action Pill Buttons
     let btn_y = y0 + 96.0;
-    surface.fill_rounded_rect(x0 + 75.0, btn_y, 76.0, 24.0, 12.0, fade_color(0x3338BDF8, alpha));
-    surface.stroke_rounded_rect(x0 + 75.0, btn_y, 76.0, 24.0, 12.0, 1.0, fade_color(APPLE_CYAN, alpha));
+    let b1_bg = if hovered == HitTarget::WaterAdd250 { 0x5538BDF8 } else { 0x3338BDF8 };
+    surface.fill_rounded_rect(x0 + 75.0, btn_y, 76.0, 24.0, 12.0, fade_color(b1_bg, alpha), false);
+    surface.stroke_rounded_rect(x0 + 75.0, btn_y, 76.0, 24.0, 12.0, 1.0, fade_color(APPLE_CYAN, alpha), false);
 
-    surface.fill_rounded_rect(x0 + 160.0, btn_y, 76.0, 24.0, 12.0, fade_color(0x3338BDF8, alpha));
-    surface.stroke_rounded_rect(x0 + 160.0, btn_y, 76.0, 24.0, 12.0, 1.0, fade_color(APPLE_CYAN, alpha));
+    let b2_bg = if hovered == HitTarget::WaterAdd500 { 0x5538BDF8 } else { 0x3338BDF8 };
+    surface.fill_rounded_rect(x0 + 160.0, btn_y, 76.0, 24.0, 12.0, fade_color(b2_bg, alpha), false);
+    surface.stroke_rounded_rect(x0 + 160.0, btn_y, 76.0, 24.0, 12.0, 1.0, fade_color(APPLE_CYAN, alpha), false);
 
-    surface.fill_rounded_rect(x0 + 245.0, btn_y, 60.0, 24.0, 12.0, fade_color(0x20FFFFFF, alpha));
+    let b3_bg = if hovered == HitTarget::WaterReset { COLOR_CONTROL_HOVER } else { 0x20FFFFFF };
+    surface.fill_rounded_rect(x0 + 245.0, btn_y, 60.0, 24.0, 12.0, fade_color(b3_bg, alpha), false);
 }
 
-fn render_expanded_todo(surface: &mut Surface, x0: f32, y0: f32, cur_w: f32, alpha: f32, page_state: &PageState) {
+fn render_expanded_todo(surface: &mut Surface, x0: f32, y0: f32, cur_w: f32, alpha: f32, page_state: &PageState, hovered: HitTarget) {
     let head_y = y0 + 20.0;
 
-    // Tasks List
     for (i, (_, done)) in page_state.tasks.iter().take(3).enumerate() {
         let row_y = head_y + 16.0 + (i as f32) * 28.0;
         let check_cx = x0 + 34.0;
         let check_cy = row_y + 10.0;
 
-        // Checkbox circle
         if *done {
             surface.fill_circle(check_cx, check_cy, 8.0, fade_color(APPLE_BLUE, alpha));
             render_check_icon(surface, check_cx, check_cy, fade_color(COLOR_TEXT_WHITE, alpha));
@@ -486,12 +605,13 @@ fn render_expanded_todo(surface: &mut Surface, x0: f32, y0: f32, cur_w: f32, alp
             surface.stroke_circle(check_cx, check_cy, 8.0, 1.5, fade_color(COLOR_TEXT_TERTIARY, alpha));
         }
 
-        // Row background on hover
-        surface.fill_rounded_rect(x0 + 18.0, row_y, cur_w - 36.0, 22.0, 6.0, fade_color(0x08FFFFFF, alpha));
+        let is_hov = hovered == HitTarget::TaskItem(i);
+        let row_bg = if is_hov { 0x1EFFFFFF } else { 0x08FFFFFF };
+        surface.fill_rounded_rect(x0 + 18.0, row_y, cur_w - 36.0, 22.0, 6.0, fade_color(row_bg, alpha), false);
     }
 }
 
-fn render_expanded_shelf(surface: &mut Surface, x0: f32, y0: f32, cur_w: f32, alpha: f32, page_state: &PageState) {
+fn render_expanded_shelf(surface: &mut Surface, x0: f32, y0: f32, cur_w: f32, alpha: f32, page_state: &PageState, hovered: HitTarget) {
     let head_y = y0 + 22.0;
 
     for (i, (_, _)) in page_state.shelf_items.iter().take(2).enumerate() {
@@ -500,21 +620,21 @@ fn render_expanded_shelf(surface: &mut Surface, x0: f32, y0: f32, cur_w: f32, al
         let card_w = cur_w - 40.0;
         let card_h = 32.0;
 
-        // Glass File Card
-        surface.fill_rounded_rect(card_x, card_y, card_w, card_h, 8.0, fade_color(0x18FFFFFF, alpha));
-        surface.stroke_rounded_rect(card_x, card_y, card_w, card_h, 8.0, 1.0, fade_color(0x22FFFFFF, alpha));
+        let is_hov = hovered == HitTarget::ShelfOpen(i);
+        let card_bg = if is_hov { 0x2AFFFFFF } else { 0x18FFFFFF };
 
-        // File icon badge
+        surface.fill_rounded_rect(card_x, card_y, card_w, card_h, 8.0, fade_color(card_bg, alpha), false);
+        surface.stroke_rounded_rect(card_x, card_y, card_w, card_h, 8.0, 1.0, fade_color(0x22FFFFFF, alpha), false);
+
         let badge_col = if i == 0 { APPLE_PURPLE } else { APPLE_ORANGE };
-        surface.fill_rounded_rect(card_x + 8.0, card_y + 6.0, 20.0, 20.0, 5.0, fade_color(badge_col, alpha));
+        surface.fill_rounded_rect(card_x + 8.0, card_y + 6.0, 20.0, 20.0, 5.0, fade_color(badge_col, alpha), false);
 
-        // Open button pill on right
         let open_x = card_x + card_w - 60.0;
-        surface.fill_rounded_rect(open_x, card_y + 5.0, 52.0, 22.0, 11.0, fade_color(0x33FFFFFF, alpha));
+        surface.fill_rounded_rect(open_x, card_y + 5.0, 52.0, 22.0, 11.0, fade_color(0x33FFFFFF, alpha), false);
     }
 }
 
-/// Crisp GDI Typography Pass directly onto HDC
+/// Crisp GDI Typography Pass
 pub unsafe fn render_gdi_text_pass(
     hdc: HDC,
     x0: i32,
@@ -522,6 +642,7 @@ pub unsafe fn render_gdi_text_pass(
     cur_w: i32,
     expand_t: f32,
     page_state: &PageState,
+    media: &MediaSnapshot,
 ) {
     if expand_t < 0.3 {
         return;
@@ -531,7 +652,7 @@ pub unsafe fn render_gdi_text_pass(
 
     match page_state.current_page {
         PageId::Music => {
-            render_gdi_music(hdc, x0, y0, cur_w, page_state);
+            render_gdi_music(hdc, x0, y0, cur_w, page_state, media);
         }
         PageId::Pomodoro => {
             render_gdi_pomodoro(hdc, x0, y0, cur_w, page_state);
@@ -561,11 +682,21 @@ unsafe fn create_font(height: i32, weight: i32) -> HFONT {
     CreateFontIndirectW(&lf)
 }
 
-unsafe fn render_gdi_music(hdc: HDC, x0: i32, y0: i32, cur_w: i32, page_state: &PageState) {
+fn fmt_time(ms: u64) -> String {
+    let s = ms / 1000;
+    format!("{}:{:02}", s / 60, s % 60)
+}
+
+unsafe fn render_gdi_music(hdc: HDC, x0: i32, y0: i32, cur_w: i32, page_state: &PageState, media: &MediaSnapshot) {
     let hfont_title = create_font(15, 700);
     let old_font = SelectObject(hdc, hfont_title);
 
-    // Track Title
+    let (title, artist) = if media.has_session {
+        (&media.title, &media.artist)
+    } else {
+        (&page_state.track_title, &page_state.track_artist)
+    };
+
     SetTextColor(hdc, COLORREF(0x00FFFFFF));
     let mut rect_title = RECT {
         left: x0 + 82,
@@ -573,10 +704,9 @@ unsafe fn render_gdi_music(hdc: HDC, x0: i32, y0: i32, cur_w: i32, page_state: &
         right: x0 + cur_w - 70,
         bottom: y0 + 38,
     };
-    let mut title_utf16 = page_state.track_title.encode_utf16().collect::<Vec<u16>>();
+    let mut title_utf16 = title.encode_utf16().collect::<Vec<u16>>();
     DrawTextW(hdc, &mut title_utf16, &mut rect_title, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
 
-    // Artist
     let hfont_sub = create_font(12, 500);
     SelectObject(hdc, hfont_sub);
     SetTextColor(hdc, COLORREF(0x00A1A1AA));
@@ -586,10 +716,10 @@ unsafe fn render_gdi_music(hdc: HDC, x0: i32, y0: i32, cur_w: i32, page_state: &
         right: x0 + cur_w - 70,
         bottom: y0 + 54,
     };
-    let mut artist_utf16 = page_state.track_artist.encode_utf16().collect::<Vec<u16>>();
+    let mut artist_utf16 = artist.encode_utf16().collect::<Vec<u16>>();
     DrawTextW(hdc, &mut artist_utf16, &mut rect_artist, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
 
-    // Lyric Line
+    // Lyric / Source Line
     SetTextColor(hdc, COLORREF(0x00F8BD38));
     let mut rect_lyric = RECT {
         left: x0 + 82,
@@ -597,20 +727,32 @@ unsafe fn render_gdi_music(hdc: HDC, x0: i32, y0: i32, cur_w: i32, page_state: &
         right: x0 + cur_w - 70,
         bottom: y0 + 72,
     };
-    let mut lyric_utf16 = page_state.current_lyric.encode_utf16().collect::<Vec<u16>>();
+    let source_str = if media.has_session && !media.source.is_empty() {
+        format!("Playing via {}", media.source)
+    } else {
+        page_state.current_lyric.clone()
+    };
+    let mut lyric_utf16 = source_str.encode_utf16().collect::<Vec<u16>>();
     DrawTextW(hdc, &mut lyric_utf16, &mut rect_lyric, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
 
     // Timestamps
     let hfont_mono = create_font(10, 500);
     SelectObject(hdc, hfont_mono);
     SetTextColor(hdc, COLORREF(0x0071717A));
+
+    let (pos_str, dur_str) = if media.has_session && media.duration_ms > 0 {
+        (fmt_time(media.position_ms_now()), fmt_time(media.duration_ms))
+    } else {
+        ("1:24".to_string(), "-2:36".to_string())
+    };
+
     let mut rect_time_l = RECT {
         left: x0 + 20,
         top: y0 + 92,
         right: x0 + 80,
         bottom: y0 + 106,
     };
-    let mut time_l = "1:24".encode_utf16().collect::<Vec<u16>>();
+    let mut time_l = pos_str.encode_utf16().collect::<Vec<u16>>();
     DrawTextW(hdc, &mut time_l, &mut rect_time_l, DT_LEFT | DT_SINGLELINE);
 
     let mut rect_time_r = RECT {
@@ -619,7 +761,7 @@ unsafe fn render_gdi_music(hdc: HDC, x0: i32, y0: i32, cur_w: i32, page_state: &
         right: x0 + cur_w - 20,
         bottom: y0 + 106,
     };
-    let mut time_r = "-2:36".encode_utf16().collect::<Vec<u16>>();
+    let mut time_r = dur_str.encode_utf16().collect::<Vec<u16>>();
     DrawTextW(hdc, &mut time_r, &mut rect_time_r, DT_RIGHT | DT_SINGLELINE);
 
     SelectObject(hdc, old_font);
@@ -632,7 +774,6 @@ unsafe fn render_gdi_pomodoro(hdc: HDC, x0: i32, y0: i32, cur_w: i32, page_state
     let hfont_title = create_font(22, 700);
     let old_font = SelectObject(hdc, hfont_title);
 
-    // Large Timer Countdown
     SetTextColor(hdc, COLORREF(0x00FFFFFF));
     let mut rect_time = RECT {
         left: x0 + 84,
@@ -644,10 +785,9 @@ unsafe fn render_gdi_pomodoro(hdc: HDC, x0: i32, y0: i32, cur_w: i32, page_state
     let mut time_utf16 = time_str.encode_utf16().collect::<Vec<u16>>();
     DrawTextW(hdc, &mut time_utf16, &mut rect_time, DT_LEFT | DT_SINGLELINE);
 
-    // Status label
     let hfont_sub = create_font(12, 500);
     SelectObject(hdc, hfont_sub);
-    SetTextColor(hdc, COLORREF(0x000095FF)); // Orange BGR
+    SetTextColor(hdc, COLORREF(0x000095FF));
     let mut rect_status = RECT {
         left: x0 + 84,
         top: y0 + 48,
@@ -657,7 +797,6 @@ unsafe fn render_gdi_pomodoro(hdc: HDC, x0: i32, y0: i32, cur_w: i32, page_state
     let mut status_utf16 = "Focus Session • 25m interval".encode_utf16().collect::<Vec<u16>>();
     DrawTextW(hdc, &mut status_utf16, &mut rect_status, DT_LEFT | DT_SINGLELINE);
 
-    // Mode labels
     let hfont_mode = create_font(11, 600);
     SelectObject(hdc, hfont_mode);
     let modes = ["25m Focus", "5m Break", "15m Rest"];
@@ -680,7 +819,6 @@ unsafe fn render_gdi_pomodoro(hdc: HDC, x0: i32, y0: i32, cur_w: i32, page_state
         DrawTextW(hdc, &mut text_utf16, &mut rect_mode, DT_CENTER | DT_SINGLELINE);
     }
 
-    // Action button texts
     let center_x = x0 + cur_w / 2;
     SetTextColor(hdc, COLORREF(0x00FFFFFF));
     let mut rect_start = RECT {
@@ -712,7 +850,6 @@ unsafe fn render_gdi_water(hdc: HDC, x0: i32, y0: i32, cur_w: i32, page_state: &
     let hfont_title = create_font(18, 700);
     let old_font = SelectObject(hdc, hfont_title);
 
-    // Large Hydration Stat
     SetTextColor(hdc, COLORREF(0x00FFFFFF));
     let mut rect_stat = RECT {
         left: x0 + 75,
@@ -724,10 +861,9 @@ unsafe fn render_gdi_water(hdc: HDC, x0: i32, y0: i32, cur_w: i32, page_state: &
     let mut stat_utf16 = stat_str.encode_utf16().collect::<Vec<u16>>();
     DrawTextW(hdc, &mut stat_utf16, &mut rect_stat, DT_LEFT | DT_SINGLELINE);
 
-    // Subtitle percentage
     let hfont_sub = create_font(12, 500);
     SelectObject(hdc, hfont_sub);
-    SetTextColor(hdc, COLORREF(0x00F8BD38)); // Cyan BGR
+    SetTextColor(hdc, COLORREF(0x00F8BD38));
     let mut rect_sub = RECT {
         left: x0 + 75,
         top: y0 + 44,
@@ -739,7 +875,6 @@ unsafe fn render_gdi_water(hdc: HDC, x0: i32, y0: i32, cur_w: i32, page_state: &
     let mut sub_utf16 = sub_str.encode_utf16().collect::<Vec<u16>>();
     DrawTextW(hdc, &mut sub_utf16, &mut rect_sub, DT_LEFT | DT_SINGLELINE);
 
-    // Buttons
     let hfont_btn = create_font(11, 600);
     SelectObject(hdc, hfont_btn);
     SetTextColor(hdc, COLORREF(0x00FFFFFF));
@@ -767,7 +902,7 @@ unsafe fn render_gdi_todo(hdc: HDC, x0: i32, y0: i32, cur_w: i32, page_state: &P
     let hfont_head = create_font(12, 700);
     let old_font = SelectObject(hdc, hfont_head);
 
-    SetTextColor(hdc, COLORREF(0x00FF7A00)); // Apple Blue BGR: 0x00FF7A00
+    SetTextColor(hdc, COLORREF(0x00FF7A00));
     let mut rect_head = RECT {
         left: x0 + 20,
         top: y0 + 16,
@@ -791,9 +926,9 @@ unsafe fn render_gdi_todo(hdc: HDC, x0: i32, y0: i32, cur_w: i32, page_state: &P
             bottom: row_y + 22,
         };
         if *done {
-            SetTextColor(hdc, COLORREF(0x0071717A)); // Dim completed
+            SetTextColor(hdc, COLORREF(0x0071717A));
         } else {
-            SetTextColor(hdc, COLORREF(0x00FFFFFF)); // White active
+            SetTextColor(hdc, COLORREF(0x00FFFFFF));
         }
         let mut t_utf16 = text.encode_utf16().collect::<Vec<u16>>();
         DrawTextW(hdc, &mut t_utf16, &mut rect_t, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
@@ -808,7 +943,7 @@ unsafe fn render_gdi_shelf(hdc: HDC, x0: i32, y0: i32, cur_w: i32, page_state: &
     let hfont_head = create_font(12, 700);
     let old_font = SelectObject(hdc, hfont_head);
 
-    SetTextColor(hdc, COLORREF(0x00DE52AF)); // Apple Purple BGR
+    SetTextColor(hdc, COLORREF(0x00DE52AF));
     let mut rect_head = RECT {
         left: x0 + 20,
         top: y0 + 16,
@@ -825,7 +960,6 @@ unsafe fn render_gdi_shelf(hdc: HDC, x0: i32, y0: i32, cur_w: i32, page_state: &
     for (i, (name, size)) in page_state.shelf_items.iter().take(2).enumerate() {
         let row_y = y0 + 38 + (i as i32) * 38;
 
-        // Name
         SelectObject(hdc, hfont_name);
         SetTextColor(hdc, COLORREF(0x00FFFFFF));
         let mut rect_n = RECT {
@@ -837,7 +971,6 @@ unsafe fn render_gdi_shelf(hdc: HDC, x0: i32, y0: i32, cur_w: i32, page_state: &
         let mut n_utf16 = name.encode_utf16().collect::<Vec<u16>>();
         DrawTextW(hdc, &mut n_utf16, &mut rect_n, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
 
-        // Size
         SelectObject(hdc, hfont_size);
         SetTextColor(hdc, COLORREF(0x0071717A));
         let mut rect_s = RECT {
@@ -849,7 +982,6 @@ unsafe fn render_gdi_shelf(hdc: HDC, x0: i32, y0: i32, cur_w: i32, page_state: &
         let mut s_utf16 = size.encode_utf16().collect::<Vec<u16>>();
         DrawTextW(hdc, &mut s_utf16, &mut rect_s, DT_LEFT | DT_SINGLELINE);
 
-        // Open Button Text
         let mut rect_btn = RECT {
             left: x0 + cur_w - 80,
             top: row_y + 9,
@@ -875,7 +1007,6 @@ fn render_mascot_eyes(surface: &mut Surface, cx: f32, cy: f32, mascot: &Mascot, 
         let ecx = cx + sign * half_spacing;
         let ecy = cy;
 
-        // Glowing white eye
         surface.fill_rounded_rect(
             ecx - mascot.eye_radius,
             ecy - eye_h,
@@ -883,9 +1014,9 @@ fn render_mascot_eyes(surface: &mut Surface, cx: f32, cy: f32, mascot: &Mascot, 
             eye_h * 2.0,
             eye_h,
             fade_color(COLOR_TEXT_WHITE, alpha),
+            false,
         );
 
-        // Cyan tracking pupil
         if mascot.blink_progress > 0.3 {
             let px = ecx + mascot.pupil_offset_x;
             let py = ecy + mascot.pupil_offset_y * mascot.blink_progress;
@@ -897,6 +1028,7 @@ fn render_mascot_eyes(surface: &mut Surface, cx: f32, cy: f32, mascot: &Mascot, 
                 pupil_h * 2.0,
                 pupil_h,
                 fade_color(0xFF0369A1, alpha),
+                false,
             );
         }
     }
@@ -906,12 +1038,12 @@ pub fn render_check_icon(surface: &mut Surface, cx: f32, cy: f32, color: u32) {
     for t in 0..4 {
         let x = cx - 3.0 + t as f32 * 0.7;
         let y = cy - 0.5 + t as f32 * 0.8;
-        surface.fill_rounded_rect(x, y, 1.6, 1.6, 0.8, color);
+        surface.fill_rounded_rect(x, y, 1.6, 1.6, 0.8, color, false);
     }
     for t in 0..7 {
         let x = cx - 1.0 + t as f32 * 0.75;
         let y = cy + 2.0 - t as f32 * 0.8;
-        surface.fill_rounded_rect(x, y, 1.6, 1.6, 0.8, color);
+        surface.fill_rounded_rect(x, y, 1.6, 1.6, 0.8, color, false);
     }
 }
 
@@ -919,25 +1051,25 @@ fn render_play_icon(surface: &mut Surface, cx: f32, cy: f32, color: u32) {
     for i in 0..10 {
         let bar_h = (i as f32) * 1.3;
         let bx = cx - 4.0 + (i as f32);
-        surface.fill_rounded_rect(bx, cy - bar_h * 0.5, 1.2, bar_h, 0.6, color);
+        surface.fill_rounded_rect(bx, cy - bar_h * 0.5, 1.2, bar_h, 0.6, color, false);
     }
 }
 
 fn render_prev_icon(surface: &mut Surface, cx: f32, cy: f32, color: u32) {
-    surface.fill_rounded_rect(cx - 5.0, cy - 5.0, 2.0, 10.0, 1.0, color);
+    surface.fill_rounded_rect(cx - 5.0, cy - 5.0, 2.0, 10.0, 1.0, color, false);
     for i in 0..6 {
         let bar_h = (5 - i) as f32 * 1.6;
         let bx = cx - 2.0 + (i as f32);
-        surface.fill_rounded_rect(bx, cy - bar_h * 0.5, 1.2, bar_h, 0.6, color);
+        surface.fill_rounded_rect(bx, cy - bar_h * 0.5, 1.2, bar_h, 0.6, color, false);
     }
 }
 
 fn render_next_icon(surface: &mut Surface, cx: f32, cy: f32, color: u32) {
-    surface.fill_rounded_rect(cx + 4.0, cy - 5.0, 2.0, 10.0, 1.0, color);
+    surface.fill_rounded_rect(cx + 4.0, cy - 5.0, 2.0, 10.0, 1.0, color, false);
     for i in 0..6 {
         let bar_h = (i as f32) * 1.6;
         let bx = cx - 4.0 + (i as f32);
-        surface.fill_rounded_rect(bx, cy - bar_h * 0.5, 1.2, bar_h, 0.6, color);
+        surface.fill_rounded_rect(bx, cy - bar_h * 0.5, 1.2, bar_h, 0.6, color, false);
     }
 }
 

@@ -4,6 +4,7 @@ use isle::spring::*;
 use isle::mascot::*;
 use isle::pages::*;
 use isle::render::*;
+use isle::media::MediaSnapshot;
 
 fn save_bmp(pixels: &[u32], path: &str) {
     let mut bmp_data = Vec::with_capacity((CANVAS_WIDTH * CANVAS_HEIGHT * 4 + 54) as usize);
@@ -40,6 +41,7 @@ fn main() {
     h_spring.current = EXPANDED_HEIGHT;
 
     let mascot = Mascot::new();
+    let media = MediaSnapshot::default();
 
     for (i, &page) in PageId::ALL.iter().enumerate() {
         let mut page_state = PageState::default();
@@ -52,6 +54,9 @@ fn main() {
             1.0,
             &mascot,
             &page_state,
+            &media,
+            false,
+            HitTarget::None,
         );
 
         let path = format!(

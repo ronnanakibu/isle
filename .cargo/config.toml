@@ -1,0 +1,7 @@
+# The rustup MinGW toolchain ships its CRT/import libraries in the
+# `self-contained` directory but does not add it to the linker's search path
+# by default on this machine, which breaks the final link with
+# "cannot find -lmingwex / crt2.o". Enabling self-contained linking makes
+# rustc pass the bundled toolchain's own directories to the linker.
+[target.x86_64-pc-windows-gnu]
+rustflags = ["-C", "link-self-contained=yes"]

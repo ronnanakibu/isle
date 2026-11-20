@@ -121,7 +121,7 @@ interface DynamicIslandProps {
   onRejectAgent?: () => void;
   onFocusTerminal?: () => void;
   // Media & Lyrics
-  track: Track;
+  track: Track | null;
   playing: boolean;
   positionSec: number;
   volume: number;
@@ -287,6 +287,7 @@ export const DynamicIsland: React.FC<DynamicIslandProps> = ({
   onSelectTab,
 }) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const hoverEnterTimer = useRef<number | null>(null);
   const hoverLeaveTimer = useRef<number | null>(null);
   const lastWheelTimeRef = useRef(0);
 
@@ -302,10 +303,14 @@ export const DynamicIsland: React.FC<DynamicIslandProps> = ({
   );
   const currentTabMeta = enabledTabs[activeIndex] ?? enabledTabs[0];
 
-  // Clock tick
+  // Clock tick & timer cleanup
   useEffect(() => {
     const id = window.setInterval(() => setNow(new Date()), 10000);
-    return () => window.clearInterval(id);
+    return () => {
+      window.clearInterval(id);
+      if (hoverEnterTimer.current !== null) window.clearTimeout(hoverEnterTimer.current);
+      if (hoverLeaveTimer.current !== null) window.clearTimeout(hoverLeaveTimer.current);
+    };
   }, []);
 
   // Click-outside & Escape key collapse
@@ -334,7 +339,7 @@ export const DynamicIsland: React.FC<DynamicIslandProps> = ({
     };
   }, [expanded, onCollapse]);
 
-  // Hover triggers
+  // Hover triggers: 200ms anti-swoop enter debounce + 260ms exit grace period
   const handleMouseEnter = () => {
     setIsHovered(true);
     if (hoverLeaveTimer.current !== null) {
@@ -342,17 +347,28 @@ export const DynamicIsland: React.FC<DynamicIslandProps> = ({
       hoverLeaveTimer.current = null;
     }
     if (expandTrigger === 'hover' && !expanded) {
-      audioEngine.playPop();
-      onExpand();
+      if (hoverEnterTimer.current !== null) {
+        window.clearTimeout(hoverEnterTimer.current);
+      }
+      hoverEnterTimer.current = window.setTimeout(() => {
+        audioEngine.playPop();
+        onExpand();
+        hoverEnterTimer.current = null;
+      }, 200);
     }
   };
 
   const handleMouseLeave = () => {
     setIsHovered(false);
+    if (hoverEnterTimer.current !== null) {
+      window.clearTimeout(hoverEnterTimer.current);
+      hoverEnterTimer.current = null;
+    }
     if (expandTrigger === 'hover' && expanded) {
       hoverLeaveTimer.current = window.setTimeout(() => {
         audioEngine.playPop();
         onCollapse();
+        hoverLeaveTimer.current = null;
       }, 260);
     }
   };
@@ -1112,7 +1128,7 @@ export const DynamicIsland: React.FC<DynamicIslandProps> = ({
                       {calendarRadar.joined ? 'Joined' : 'Join'}
                     </button>
                   </div>
-                ) : compactMode === 'media' || (isSplit && playing) ? (
+                ) : (compactMode === 'media' || (isSplit && playing)) && track ? (
                   /* Dynamic Breathing Lyric Pill OR Compact Marquee */
                   !isInstrumentalBreak && activeLyricLine?.text && shibaSettings.liveLyricTicker !== false ? (
                     /* Living Lyric Ticker */

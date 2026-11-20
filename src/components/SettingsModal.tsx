@@ -12,12 +12,14 @@ import {
   Sun,
   X,
 } from 'lucide-react';
-import type { PresenceLevel, ShibaSettings, TabConfigItem, ThemeMode } from '../types';
+import type { ExpandTrigger, PresenceLevel, ShibaSettings, TabConfigItem, ThemeMode } from '../types';
 
 interface SettingsModalProps {
   open: boolean;
   settings: ShibaSettings;
   tabConfig: TabConfigItem[];
+  expandTrigger: ExpandTrigger;
+  onChangeExpandTrigger: (mode: ExpandTrigger) => void;
   onClose: () => void;
   onUpdateSettings: (patch: Partial<ShibaSettings>) => void;
   onReorderTabs: (next: TabConfigItem[]) => void;
@@ -50,6 +52,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   open,
   settings,
   tabConfig,
+  expandTrigger,
+  onChangeExpandTrigger,
   onClose,
   onUpdateSettings,
   onReorderTabs,
@@ -172,6 +176,46 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     </p>
                   </motion.div>
                 )}
+              </div>
+
+              {/* Expand Trigger: Click vs Hover */}
+              <div>
+                <div className="flex items-center justify-between mb-2">
+                  <p className="text-[11px] font-semibold uppercase tracking-wider text-white/50">
+                    Expand Trigger
+                  </p>
+                  <span className="text-[10px] text-white/40">Tray Sync</span>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => onChangeExpandTrigger('click')}
+                    className={`p-2.5 rounded-2xl border text-left transition-all cursor-pointer ${
+                      expandTrigger === 'click'
+                        ? 'bg-sky-400/20 border-sky-400/50 text-white shadow-sm'
+                        : 'bg-white/[0.04] hover:bg-white/[0.08] border-white/[0.08] text-white/70'
+                    }`}
+                  >
+                    <p className="text-[12px] font-semibold">Click to Expand</p>
+                    <p className="text-[9.5px] text-white/50 leading-snug mt-0.5">
+                      Expands on explicit click, zero accidental sweeps
+                    </p>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onChangeExpandTrigger('hover')}
+                    className={`p-2.5 rounded-2xl border text-left transition-all cursor-pointer ${
+                      expandTrigger === 'hover'
+                        ? 'bg-sky-400/20 border-sky-400/50 text-white shadow-sm'
+                        : 'bg-white/[0.04] hover:bg-white/[0.08] border-white/[0.08] text-white/70'
+                    }`}
+                  >
+                    <p className="text-[12px] font-semibold">Hover to Expand</p>
+                    <p className="text-[9.5px] text-white/50 leading-snug mt-0.5">
+                      200ms anti-swoop debounce + 260ms exit grace period
+                    </p>
+                  </button>
+                </div>
               </div>
 
               {/* Shiba Presence Level */}

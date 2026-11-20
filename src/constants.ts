@@ -1,5 +1,4 @@
 import type {
-  ClipboardItem,
   FocusPhase,
   PowerPlan,
   ShibaSettings,
@@ -7,7 +6,6 @@ import type {
   TabKey,
   TaskItem,
   TaskPriorityColor,
-  Track,
 } from './types';
 
 // ---------------------------------------------------------------------------
@@ -162,153 +160,6 @@ export const FOCUS_PHASE_CONFIG: Record<
 };
 
 // ---------------------------------------------------------------------------
-// Clipboard Seed Items
-// ---------------------------------------------------------------------------
-
-export const DEFAULT_CLIPBOARD_ITEMS: ClipboardItem[] = [
-  {
-    id: 'clip-1',
-    content: 'const spring = { type: "spring", stiffness: 380, damping: 30 };',
-    badge: 'CODE',
-    pinned: true,
-    copiedAt: '2m ago',
-  },
-  {
-    id: 'clip-2',
-    content: 'https://lrclib.net/api/get?track_name=Midnight+City',
-    badge: 'URL',
-    pinned: false,
-    copiedAt: '6m ago',
-  },
-  {
-    id: 'clip-3',
-    content: '#5EC8FF',
-    badge: 'HEX',
-    pinned: false,
-    copiedAt: '11m ago',
-  },
-  {
-    id: 'clip-4',
-    content: 'adb connect 192.168.1.42:5555',
-    badge: 'CODE',
-    pinned: false,
-    copiedAt: '18m ago',
-  },
-  {
-    id: 'clip-5',
-    content: 'Sprint Review — Claude Code HUD & Nusa Parity demo at 15:00',
-    badge: 'TEXT',
-    pinned: false,
-    copiedAt: '24m ago',
-  },
-  {
-    id: 'clip-6',
-    content: '#E89B48',
-    badge: 'HEX',
-    pinned: false,
-    copiedAt: '31m ago',
-  },
-  {
-    id: 'clip-7',
-    content: 'cargo test --lib -- --nocapture',
-    badge: 'CODE',
-    pinned: false,
-    copiedAt: '45m ago',
-  },
-  {
-    id: 'clip-8',
-    content: 'backdrop-filter: blur(32px) saturate(180%);',
-    badge: 'CODE',
-    pinned: false,
-    copiedAt: '1h ago',
-  },
-];
-
-// ---------------------------------------------------------------------------
-// Curated Tracks (Live LRCLIB + Offline Fallback Cues)
-// ---------------------------------------------------------------------------
-
-export const PRESET_TRACKS: Track[] = [
-  {
-    id: 'midnight-city',
-    title: 'Midnight City',
-    artist: 'M83',
-    album: "Hurry Up, We're Dreaming",
-    durationSec: 243,
-    initialPositionSec: 38,
-    bpm: 105,
-    accentColor: '#A855F7',
-    coverGradient: ['#311042', '#7E22CE', '#EC4899'],
-    synthChord: [261.63, 329.63, 392.0, 493.88],
-    fallbackLrc: `[00:00.00] ♪ Synthwave Intro — M83
-[00:18.00] ♪ Analog arpeggio rising
-[00:37.68] Waiting in a car
-[00:42.37] Waiting for a ride in the dark
-[00:46.88] The night city grows
-[00:51.33] Look at the horizon glow
-[00:56.78] ♪ Instrumental shimmer
-[01:14.23] Waiting in a car
-[01:18.80] Waiting for a ride in the dark
-[01:23.40] Drinking in the lounge
-[01:28.10] Following the neon signs`,
-  },
-  {
-    id: 'blinding-lights',
-    title: 'Blinding Lights',
-    artist: 'The Weeknd',
-    album: 'After Hours',
-    durationSec: 200,
-    initialPositionSec: 28,
-    bpm: 171,
-    accentColor: '#F43F5E',
-    coverGradient: ['#450A0A', '#DC2626', '#F59E0B'],
-    synthChord: [293.66, 349.23, 440.0, 523.25],
-    fallbackLrc: `[00:00.00] ♪ Retro Synth Pulse — The Weeknd
-[00:14.00] ♪ Drum machine kicks in
-[00:27.50] I've been tryna call
-[00:30.20] I've been on my own for long enough
-[00:33.10] Maybe you can show me how to love, maybe
-[00:38.80] I'm going through withdrawals
-[00:41.50] You don't even have to do too much`,
-  },
-  {
-    id: 'get-lucky',
-    title: 'Get Lucky',
-    artist: 'Daft Punk',
-    album: 'Random Access Memories',
-    durationSec: 248,
-    initialPositionSec: 32,
-    bpm: 116,
-    accentColor: '#FBBF24',
-    coverGradient: ['#1E1B4B', '#B45309', '#FBBF24'],
-    synthChord: [246.94, 293.66, 369.99, 440.0],
-    fallbackLrc: `[00:00.00] ♪ Funk Guitar Groove — Daft Punk
-[00:16.00] ♪ Vocoder shimmer
-[00:31.50] Like the legend of the phoenix
-[00:35.80] All ends with beginnings
-[00:39.90] What keeps the planet spinning
-[00:44.10] The force from the beginning`,
-  },
-  {
-    id: 'as-it-was',
-    title: 'As It Was',
-    artist: 'Harry Styles',
-    album: "Harry's House",
-    durationSec: 167,
-    initialPositionSec: 16,
-    bpm: 174,
-    accentColor: '#38BDF8',
-    coverGradient: ['#0C4A6E', '#0284C7', '#FB7185'],
-    synthChord: [220.0, 277.18, 329.63, 415.3],
-    fallbackLrc: `[00:00.00] ♪ Bright Synth Riff — Harry Styles
-[00:15.20] Holdin' me back
-[00:18.40] Gravity's holdin' me back
-[00:21.60] I want you to hold out the palm of your hand
-[00:25.10] Why don't we leave it at that?`,
-  },
-];
-
-// ---------------------------------------------------------------------------
 // Default Tasks & Storage Keys
 // ---------------------------------------------------------------------------
 
@@ -350,4 +201,5 @@ export const STORAGE_KEYS = {
   clipboard: 'isle_clipboard_v2',
   settings: 'isle_shiba_settings_v2',
   tabs: 'isle_tab_config_v2',
+  expandTrigger: 'isle_expand_trigger',
 } as const;

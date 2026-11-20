@@ -1,5 +1,4 @@
 import {
-  DEFAULT_CLIPBOARD_ITEMS,
   DEFAULT_SHIBA_SETTINGS,
   DEFAULT_TAB_CONFIG,
   DEFAULT_TASKS,
@@ -200,12 +199,12 @@ export const ClipboardStorage = {
       const raw = localStorage.getItem(STORAGE_KEYS.clipboard);
       if (raw) {
         const parsed = JSON.parse(raw) as ClipboardItem[];
-        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+        if (Array.isArray(parsed)) return parsed;
       }
     } catch {
       // Ignore
     }
-    return DEFAULT_CLIPBOARD_ITEMS;
+    return [];
   },
 
   save(items: ClipboardItem[]): void {
@@ -218,6 +217,20 @@ export const ClipboardStorage = {
 // ---------------------------------------------------------------------------
 
 export const SettingsStorage = {
+  loadExpandTrigger(): 'click' | 'hover' {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEYS.expandTrigger);
+      if (raw === 'click' || raw === 'hover') return raw;
+    } catch {
+      // Ignore
+    }
+    return 'click';
+  },
+
+  saveExpandTrigger(mode: 'click' | 'hover'): void {
+    debouncedSetItem(STORAGE_KEYS.expandTrigger, mode);
+  },
+
   loadSettings(): ShibaSettings {
     try {
       const raw = localStorage.getItem(STORAGE_KEYS.settings);

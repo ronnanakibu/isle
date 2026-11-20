@@ -4,10 +4,9 @@ import { DynamicIsland } from './components/DynamicIsland';
 import { SettingsModal } from './components/SettingsModal';
 import {
   FOCUS_PHASE_CONFIG,
-  PRESET_TRACKS,
 } from './constants';
 import { useShibaBehavior } from './hooks/useShibaBehavior';
-import { fetchLrclibLyrics, parseLrc } from './services/lyrics';
+import { fetchLrclibLyrics } from './services/lyrics';
 import {
   ClipboardStorage,
   getTodayKey,
@@ -58,26 +57,45 @@ function inferFileKind(name: string): ShelfFile['kind'] {
   return 'other';
 }
 
-function resizeTauriWindow(width: number, height: number) {
+function inferBadge(text: string): 'CODE' | 'URL' | 'HEX' | 'TEXT' {
+  const t = text.trim();
+  if (/^https?:\/\//i.test(t)) return 'URL';
+  if (/^#(?:[0-9a-fA-F]{3,8})$/.test(t)) return 'HEX';
+  if (/[\{\}\(\)=>\[\];]|const |let |fn |def |function |import /.test(t)) return 'CODE';
+  return 'TEXT';
+}
+
+async function tauriInvoke<T>(cmd: string, args: Record<string, unknown> = {}): Promise<T | null> {
   try {
-    const tauri = (window as unknown as { __TAURI_INTERNALS__?: { invoke: (cmd: string, args: unknown) => Promise<unknown> } }).__TAURI_INTERNALS__;
+    const tauri = (window as unknown as { __TAURI_INTERNALS__?: { invoke: (c: string, a: unknown) => Promise<T> } }).__TAURI_INTERNALS__;
     if (tauri?.invoke) {
-      void tauri.invoke('set_island_size', { width, height });
+      return await tauri.invoke(cmd, args);
     }
   } catch {
     // browser preview mode
   }
+  return null;
+}
+
+function resizeTauriWindow(width: number, height: number) {
+  void tauriInvoke('set_island_size', { width, height });
 }
 
 export function App() {
   // Desktop simulation controls
   const [wallpaper, setWallpaper] = useState<WallpaperId>('transparent');
   const [mountMode, setMountMode] = useState<MountMode>('notch');
-  const [expandTrigger, setExpandTrigger] = useState<ExpandTrigger>('click');
+  const [expandTrigger, setExpandTrigger] = useState<ExpandTrigger>(() => SettingsStorage.loadExpandTrigger());
   const [expanded, setExpanded] = useState(false);
   const [simulatedFullscreen, setSimulatedFullscreen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [showDevSimulator, setShowDevSimulator] = useState(false);
+
+  const handleSetExpandTrigger = useCallback((mode: ExpandTrigger) => {
+    setExpandTrigger(mode);
+    SettingsStorage.saveExpandTrigger(mode);
+    void tauriInvoke('sync_expand_trigger_tray', { mode });
+  }, []);
 
   // Dynamic window resizing for OS desktop (Compact 280x44 vs Expanded 780x260)
   // Ensures mouse clicks never hit transparent bounds when Isle is collapsed
@@ -216,15 +234,15 @@ export function App() {
     }
   }, [shibaSettings.autoHideOnScreenshot, showHudOverlay]);
 
-  // Section 5.4: ThinkPad F4 Mic Mute Handler
+  // ThinkPad F4 Mic Mute Handler (wired to real Windows Core Audio)
   const handleToggleMicMute = useCallback(() => {
     audioEngine.playClick();
-    setMicMuted((prev) => {
-      const next = !prev;
+    void tauriInvoke<boolean>('toggle_real_mic_mute').then((newMute) => {
+      const next = typeof newMute === 'boolean' ? newMute : !micMuted;
+      setMicMuted(next);
       showHudOverlay({ kind: 'mic', muted: next }, 1600);
-      return next;
     });
-  }, [showHudOverlay]);
+  }, [micMuted, showHudOverlay]);
 
   // Real Hardware hotkeys: CapsLock, ThinkPad F4 Mic Mute, PrintScreen
   useEffect(() => {
@@ -245,26 +263,164 @@ export function App() {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [showHudOverlay, handleToggleMicMute, captureScreenshot]);
 
-  // Media & LRCLIB state
-  const [tracks] = useState<Track[]>(PRESET_TRACKS);
-  const [trackIndex, setTrackIndex] = useState(0);
+  // Real Battery Polling (GetSystemPowerStatus)
+  useEffect(() => {
+    let mounted = true;
+    const pollBattery = async () => {
+      const res = await tauriInvoke<{ percentage: number; charging: boolean }>('get_real_battery');
+      if (!mounted) return;
+      if (res) {
+        setBatteryPct(res.percentage);
+        setCharging(res.charging);
+      }
+    };
+    void pollBattery();
+    const id = window.setInterval(pollBattery, 4000);
+    return () => {
+      mounted = false;
+      window.clearInterval(id);
+    };
+  }, []);
+
+  // Real Microphone Mute Polling (IAudioEndpointVolume)
+  useEffect(() => {
+    let mounted = true;
+    const pollMic = async () => {
+      const muted = await tauriInvoke<boolean>('get_real_mic_mute');
+      if (!mounted) return;
+      if (typeof muted === 'boolean') {
+        setMicMuted(muted);
+      }
+    };
+    void pollMic();
+    const id = window.setInterval(pollMic, 2000);
+    return () => {
+      mounted = false;
+      window.clearInterval(id);
+    };
+  }, []);
+
+  // Real Win32 Clipboard Listener Polling (WM_CLIPBOARDUPDATE)
+  useEffect(() => {
+    let mounted = true;
+    const pollClipboard = async () => {
+      const text = await tauriInvoke<string | null>('get_real_clipboard');
+      if (!mounted) return;
+      if (text && typeof text === 'string' && text.trim().length > 0) {
+        setClipboardItems((prev) => {
+          if (prev.length > 0 && prev[0].content === text) return prev;
+          const badge = inferBadge(text);
+          const newItem: ClipboardItem = {
+            id: `clip-${Date.now()}`,
+            content: text,
+            badge,
+            pinned: false,
+            copiedAt: 'Just now',
+          };
+          const next = [newItem, ...prev.filter((i) => i.content !== text)].slice(0, 30);
+          ClipboardStorage.save(next);
+          return next;
+        });
+      }
+    };
+    void pollClipboard();
+    const id = window.setInterval(pollClipboard, 1500);
+    return () => {
+      mounted = false;
+      window.clearInterval(id);
+    };
+  }, []);
+
+  // System Tray Event Listeners (Bidirectional sync with Native Windows Tray)
+  useEffect(() => {
+    const handleTraySettings = () => setSettingsOpen(true);
+    const handleTrayTrigger = (e: Event) => {
+      const detail = (e as CustomEvent<string>).detail;
+      if (detail === 'click' || detail === 'hover') {
+        setExpandTrigger(detail);
+        SettingsStorage.saveExpandTrigger(detail);
+      }
+    };
+    const handleTrayToggle = () => setExpanded((prev) => !prev);
+
+    window.addEventListener('tray-open-settings', handleTraySettings);
+    window.addEventListener('tray-change-trigger', handleTrayTrigger);
+    window.addEventListener('tray-toggle-island', handleTrayToggle);
+
+    return () => {
+      window.removeEventListener('tray-open-settings', handleTraySettings);
+      window.removeEventListener('tray-change-trigger', handleTrayTrigger);
+      window.removeEventListener('tray-toggle-island', handleTrayToggle);
+    };
+  }, []);
+
+  // Real Media via WinRT SMTC & LRCLIB State (Zero-Mockup Mandate)
+  const [currentTrack, setCurrentTrack] = useState<Track | null>(null);
   const [playing, setPlaying] = useState(false);
-  const [positionSec, setPositionSec] = useState(PRESET_TRACKS[0].initialPositionSec);
+  const [positionSec, setPositionSec] = useState(0);
   const [volume, setVolume] = useState(0.45);
-  const localAudioElRef = useRef<HTMLAudioElement | null>(null);
 
-  const currentTrack = tracks[trackIndex] ?? tracks[0];
-
-  const [lyrics, setLyrics] = useState<LyricsState>(() => ({
-    lines: parseLrc(PRESET_TRACKS[0].fallbackLrc),
-    source: 'loading',
-    synced: true,
-    trackKey: `${PRESET_TRACKS[0].title}::${PRESET_TRACKS[0].artist}`,
-  }));
+  const [lyrics, setLyrics] = useState<LyricsState>({
+    lines: [],
+    source: 'fallback',
+    synced: false,
+    trackKey: '',
+  });
   const lyricsCacheRef = useRef<Map<string, LyricsState>>(new Map());
 
-  // Fetch live LRCLIB synced lyrics
+  // Poll real WinRT SMTC Media Status
   useEffect(() => {
+    let mounted = true;
+    interface RealMediaStatus {
+      has_session: boolean;
+      title: string;
+      artist: string;
+      album: string;
+      is_playing: boolean;
+      position_sec: number;
+      duration_sec: number;
+    }
+
+    const pollMedia = async () => {
+      const res = await tauriInvoke<RealMediaStatus>('get_real_media');
+      if (!mounted) return;
+      if (res && res.has_session && res.title) {
+        const trackId = `${res.title}::${res.artist}`;
+        setCurrentTrack({
+          id: trackId,
+          title: res.title,
+          artist: res.artist,
+          album: res.album || 'Unknown Album',
+          durationSec: res.duration_sec > 0 ? res.duration_sec : 180,
+          initialPositionSec: res.position_sec,
+          bpm: 110,
+          accentColor: '#5EC8FF',
+          coverGradient: ['#38BDF8', '#818CF8', '#C084FC'],
+          synthChord: [261.63, 329.63, 392.0],
+          fallbackLrc: '',
+        });
+        setPlaying(res.is_playing);
+        setPositionSec(res.position_sec);
+      } else if (res && !res.has_session) {
+        setCurrentTrack(null);
+        setPlaying(false);
+      }
+    };
+
+    void pollMedia();
+    const id = window.setInterval(pollMedia, 1200);
+    return () => {
+      mounted = false;
+      window.clearInterval(id);
+    };
+  }, []);
+
+  // Fetch live LRCLIB synced lyrics when currentTrack changes
+  useEffect(() => {
+    if (!currentTrack) {
+      setLyrics({ lines: [], source: 'fallback', synced: false, trackKey: '' });
+      return;
+    }
     const key = `${currentTrack.title}::${currentTrack.artist}`;
     const cached = lyricsCacheRef.current.get(key);
     if (cached) {
@@ -273,12 +429,10 @@ export function App() {
     }
 
     const controller = new AbortController();
-    const fallbackLines = parseLrc(currentTrack.fallbackLrc);
-
     setLyrics({
-      lines: fallbackLines,
+      lines: [],
       source: 'loading',
-      synced: fallbackLines.length > 0,
+      synced: false,
       trackKey: key,
     });
 
@@ -298,9 +452,9 @@ export function App() {
               trackKey: key,
             }
           : {
-              lines: fallbackLines,
+              lines: [],
               source: 'fallback',
-              synced: fallbackLines.length > 0,
+              synced: false,
               trackKey: key,
             };
       lyricsCacheRef.current.set(key, nextState);
@@ -308,67 +462,24 @@ export function App() {
     });
 
     return () => controller.abort();
-  }, [currentTrack.id, currentTrack.title, currentTrack.artist, currentTrack.durationSec, currentTrack.fallbackLrc]);
+  }, [currentTrack?.title, currentTrack?.artist, currentTrack?.durationSec]);
 
-  // Audio engine playback synchronization
-  useEffect(() => {
-    if (localAudioElRef.current) {
-      if (playing) {
-        void localAudioElRef.current.play().catch(() => {});
-      } else {
-        localAudioElRef.current.pause();
-      }
-      return;
-    }
+  // Media Transport Handlers
+  const handleTogglePlay = useCallback(() => {
+    void tauriInvoke('media_control', { action: 'play_pause' });
+    setPlaying((prev) => !prev);
+  }, []);
 
-    if (playing) {
-      audioEngine.startAmbient(currentTrack.bpm, currentTrack.synthChord, volume);
-    } else {
-      audioEngine.stopAmbient();
-    }
-    return () => {
-      audioEngine.stopAmbient();
-    };
-  }, [playing, currentTrack.id, currentTrack.bpm, currentTrack.synthChord, volume]);
+  const handleNextTrack = useCallback(() => {
+    void tauriInvoke('media_control', { action: 'next' });
+  }, []);
 
-  useEffect(() => {
-    audioEngine.setVolume(volume);
-  }, [volume]);
-
-  // Playback timer progression
-  useEffect(() => {
-    if (!playing || localAudioElRef.current) return;
-    const id = window.setInterval(() => {
-      setPositionSec((prev) => {
-        const next = prev + 0.2;
-        if (next >= currentTrack.durationSec) {
-          setTrackIndex((idx) => (idx + 1) % tracks.length);
-          return 0;
-        }
-        return next;
-      });
-    }, 200);
-    return () => window.clearInterval(id);
-  }, [playing, currentTrack.durationSec, tracks.length]);
-
-  const handleSelectTrack = useCallback(
-    (nextIdx: number) => {
-      if (localAudioElRef.current) {
-        localAudioElRef.current.pause();
-        localAudioElRef.current = null;
-      }
-      const normalized = (nextIdx + tracks.length) % tracks.length;
-      setTrackIndex(normalized);
-      setPositionSec(tracks[normalized].initialPositionSec);
-    },
-    [tracks]
-  );
+  const handlePrevTrack = useCallback(() => {
+    void tauriInvoke('media_control', { action: 'prev' });
+  }, []);
 
   const handleSeek = useCallback((sec: number) => {
     setPositionSec(sec);
-    if (localAudioElRef.current) {
-      localAudioElRef.current.currentTime = sec;
-    }
   }, []);
 
   // Focus / Pomodoro state
@@ -1060,7 +1171,7 @@ export function App() {
       if (e.key === 'ArrowRight') {
         e.preventDefault();
         audioEngine.playClick();
-        handleSeek(Math.min(currentTrack.durationSec, positionSec + 5));
+        handleSeek(Math.min(currentTrack?.durationSec ?? 180, positionSec + 5));
         return;
       }
 
@@ -1094,7 +1205,7 @@ export function App() {
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [
-    currentTrack.durationSec,
+    currentTrack?.durationSec,
     enabledTabs,
     expanded,
     handleSeek,
@@ -1204,12 +1315,9 @@ export function App() {
         lyrics={lyrics}
         showLyrics={showLyrics}
         onToggleShowLyrics={() => setShowLyrics((v) => !v)}
-        onTogglePlay={() => {
-          audioEngine.playClick();
-          setPlaying((p) => !p);
-        }}
-        onPrevTrack={() => handleSelectTrack(trackIndex - 1)}
-        onNextTrack={() => handleSelectTrack(trackIndex + 1)}
+        onTogglePlay={handleTogglePlay}
+        onPrevTrack={handlePrevTrack}
+        onNextTrack={handleNextTrack}
         onSeek={handleSeek}
         onVolumeChange={(vol) => {
           setVolume(vol);
@@ -1308,6 +1416,8 @@ export function App() {
           open={settingsOpen}
           settings={shibaSettings}
           tabConfig={tabConfig}
+          expandTrigger={expandTrigger}
+          onChangeExpandTrigger={handleSetExpandTrigger}
           onClose={() => setSettingsOpen(false)}
           onUpdateSettings={updateShibaSettings}
           onReorderTabs={setTabConfig}

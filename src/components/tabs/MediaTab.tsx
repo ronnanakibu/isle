@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   AlignLeft,
+  Music,
   Pause,
   Play,
   SkipBack,
@@ -14,7 +15,7 @@ import { formatTime, getActiveLyricIndex } from '../../services/lyrics';
 import { Equalizer } from '../Equalizer';
 
 interface MediaTabProps {
-  track: Track;
+  track: Track | null;
   playing: boolean;
   positionSec: number;
   volume: number;
@@ -59,7 +60,21 @@ export const MediaTab: React.FC<MediaTabProps> = ({
     if (activeEl) {
       activeEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
     }
-  }, [activeIndex, track.id, showLyrics]);
+  }, [activeIndex, track?.id, showLyrics]);
+
+  if (!track) {
+    return (
+      <div className="w-full h-full flex flex-col items-center justify-center text-center p-6 select-none">
+        <div className="w-12 h-12 rounded-2xl bg-white/[0.05] border border-white/10 flex items-center justify-center text-white/40 mb-3 shadow-inner">
+          <Music className="w-6 h-6 stroke-[1.5]" />
+        </div>
+        <h3 className="text-[13px] font-semibold text-white/90">No Media Active</h3>
+        <p className="text-[11px] text-white/50 max-w-[240px] mt-1 leading-relaxed">
+          Play music or video on Spotify, Apple Music, or your browser to view live track info and synced lyrics.
+        </p>
+      </div>
+    );
+  }
 
   const progressPct =
     track.durationSec > 0

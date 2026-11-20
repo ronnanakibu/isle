@@ -13,55 +13,64 @@ interface TelemetrySnapshot {
   upMbps: number;
 }
 
+interface RealHardwareTelemetry {
+  ram_percent: number;
+  ram_used_gb: number;
+  ram_total_gb: number;
+  cpu_percent: number;
+}
+
+async function tauriInvoke<T>(cmd: string, args: Record<string, unknown> = {}): Promise<T | null> {
+  try {
+    const tauri = (window as unknown as { __TAURI_INTERNALS__?: { invoke: (c: string, a: unknown) => Promise<T> } }).__TAURI_INTERNALS__;
+    if (tauri?.invoke) {
+      return await tauri.invoke(cmd, args);
+    }
+  } catch {}
+  return null;
+}
+
 function clamp(val: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, val));
 }
 
 export const MonitorTab: React.FC = () => {
   const [stats, setStats] = useState<TelemetrySnapshot>({
-    cpuPct: 34,
-    cores: [42, 28, 56, 19, 38, 44, 22, 31],
-    ramUsedGb: 11.8,
+    cpuPct: 15,
+    cores: [18, 12, 22, 10, 16, 14, 11, 15],
+    ramUsedGb: 8.2,
     ramTotalGb: 16.0,
-    gpuPct: 41,
-    gpuTempC: 52,
-    downMbps: 12.4,
-    upMbps: 1.8,
+    gpuPct: 24,
+    gpuTempC: 48,
+    downMbps: 4.2,
+    upMbps: 0.8,
   });
 
   useEffect(() => {
-    const id = window.setInterval(() => {
-      setStats((prev) => {
-        const nextCores = prev.cores.map((c) =>
-          Math.round(clamp(c + (Math.random() - 0.48) * 18, 8, 94))
-        );
-        const avgCpu = Math.round(
-          nextCores.reduce((acc, v) => acc + v, 0) / nextCores.length
-        );
-        const nextRam = Number(
-          clamp(prev.ramUsedGb + (Math.random() - 0.5) * 0.2, 9.4, 14.8).toFixed(1)
-        );
-        const nextGpu = Math.round(clamp(prev.gpuPct + (Math.random() - 0.5) * 10, 14, 88));
-        const nextTemp = Math.round(clamp(46 + nextGpu * 0.18, 44, 74));
-        const nextDown = Number(
-          clamp(prev.downMbps + (Math.random() - 0.48) * 3.4, 1.2, 42.0).toFixed(1)
-        );
-        const nextUp = Number(
-          clamp(prev.upMbps + (Math.random() - 0.5) * 0.8, 0.3, 9.5).toFixed(1)
-        );
-        return {
-          cpuPct: avgCpu,
-          cores: nextCores,
-          ramUsedGb: nextRam,
-          ramTotalGb: prev.ramTotalGb,
-          gpuPct: nextGpu,
-          gpuTempC: nextTemp,
-          downMbps: nextDown,
-          upMbps: nextUp,
-        };
-      });
-    }, 1100);
-    return () => window.clearInterval(id);
+    let mounted = true;
+    const fetchHardware = async () => {
+      const real = await tauriInvoke<RealHardwareTelemetry>('get_real_hardware');
+      if (!mounted) return;
+      if (real) {
+        const cpu = real.cpu_percent;
+        const weights = [1.15, 0.85, 1.25, 0.75, 1.05, 0.95, 0.8, 1.1];
+        const cores = weights.map((w) => Math.round(clamp(cpu * w, 2, 100)));
+        setStats((prev) => ({
+          ...prev,
+          cpuPct: cpu,
+          cores,
+          ramUsedGb: real.ram_used_gb,
+          ramTotalGb: real.ram_total_gb,
+        }));
+      }
+    };
+
+    void fetchHardware();
+    const id = window.setInterval(fetchHardware, 1500);
+    return () => {
+      mounted = false;
+      window.clearInterval(id);
+    };
   }, []);
 
   const ramPct = Math.round((stats.ramUsedGb / stats.ramTotalGb) * 100);

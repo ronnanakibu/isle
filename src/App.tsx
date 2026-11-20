@@ -58,6 +58,17 @@ function inferFileKind(name: string): ShelfFile['kind'] {
   return 'other';
 }
 
+function resizeTauriWindow(width: number, height: number) {
+  try {
+    const tauri = (window as unknown as { __TAURI_INTERNALS__?: { invoke: (cmd: string, args: unknown) => Promise<unknown> } }).__TAURI_INTERNALS__;
+    if (tauri?.invoke) {
+      void tauri.invoke('set_island_size', { width, height });
+    }
+  } catch {
+    // browser preview mode
+  }
+}
+
 export function App() {
   // Desktop simulation controls
   const [wallpaper, setWallpaper] = useState<WallpaperId>('transparent');
@@ -67,6 +78,18 @@ export function App() {
   const [simulatedFullscreen, setSimulatedFullscreen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [showDevSimulator, setShowDevSimulator] = useState(false);
+
+  // Dynamic window resizing for OS desktop (Compact 280x44 vs Expanded 780x260)
+  // Ensures mouse clicks never hit transparent bounds when Isle is collapsed
+  useEffect(() => {
+    if (settingsOpen) {
+      resizeTauriWindow(620, 540);
+    } else if (expanded) {
+      resizeTauriWindow(780, 260);
+    } else {
+      resizeTauriWindow(280, 44);
+    }
+  }, [expanded, settingsOpen]);
 
   // Tab configuration & active tab (Consolidated 7 Tabs)
   const [tabConfig, setTabConfig] = useState<TabConfigItem[]>(() =>

@@ -347,6 +347,12 @@ pub fn render_apple_island(
             PageId::Shelf => {
                 surface.fill_rounded_rect(lead_x + 2.0, lead_y + 3.0, 16.0, 14.0, 3.0, fade_color(APPLE_PURPLE, alpha), false);
             }
+            PageId::Hardware => {
+                surface.fill_rounded_rect(lead_x + 2.0, lead_y + 2.0, 16.0, 16.0, 4.0, fade_color(APPLE_GREEN, alpha), false);
+            }
+            PageId::Zen => {
+                surface.fill_circle(lead_x + 10.0, lead_y + 10.0, 7.0, fade_color(APPLE_CYAN, alpha));
+            }
         }
 
         // Center Mascot Eyes
@@ -394,6 +400,12 @@ pub fn render_apple_island(
             }
             PageId::Shelf => {
                 render_expanded_shelf(surface, x0, y0, cur_w, alpha, page_state, hovered);
+            }
+            PageId::Hardware => {
+                render_expanded_hardware(surface, x0, y0, cur_w, alpha, page_state, hovered);
+            }
+            PageId::Zen => {
+                render_expanded_zen(surface, x0, y0, cur_w, alpha, page_state, hovered);
             }
         }
 
@@ -665,6 +677,12 @@ pub unsafe fn render_gdi_text_pass(
         }
         PageId::Shelf => {
             render_gdi_shelf(hdc, x0, y0, cur_w, page_state);
+        }
+        PageId::Hardware => {
+            render_gdi_hardware(hdc, x0, y0, cur_w, page_state);
+        }
+        PageId::Zen => {
+            render_gdi_zen(hdc, x0, y0, cur_w, page_state);
         }
     }
 }
@@ -1083,3 +1101,109 @@ pub fn fade_color(color: u32, alpha_factor: f32) -> u32 {
         | ((g.round() as u32) << 8)
         | (b.round() as u32)
 }
+
+fn render_expanded_hardware(
+    surface: &mut Surface,
+    x0: f32,
+    y0: f32,
+    cur_w: f32,
+    alpha: f32,
+    page_state: &PageState,
+    _hovered: HitTarget,
+) {
+    let card_x = x0 + 16.0;
+    let card_w = cur_w - 32.0;
+    let card_y = y0 + 60.0;
+
+    // CPU multi-core distribution bars
+    let cores = &page_state.hw_tab.cores;
+    let bar_spacing = card_w / 8.0;
+    for (i, &load) in cores.iter().enumerate() {
+        let bx = card_x + (i as f32) * bar_spacing + 4.0;
+        let bw = (bar_spacing - 8.0).max(4.0);
+        let max_h = 44.0;
+        let h = (load as f32 / 100.0 * max_h).max(3.0);
+        let by = card_y + max_h - h + 18.0;
+        let col = if load > 75 {
+            APPLE_RED
+        } else if load > 50 {
+            APPLE_ORANGE
+        } else {
+            APPLE_GREEN
+        };
+        surface.fill_rounded_rect(bx, by, bw, h, 2.0, fade_color(col, alpha), false);
+    }
+}
+
+fn render_expanded_zen(
+    surface: &mut Surface,
+    x0: f32,
+    y0: f32,
+    cur_w: f32,
+    alpha: f32,
+    page_state: &PageState,
+    _hovered: HitTarget,
+) {
+    let cx = x0 + cur_w * 0.5;
+    let cy = y0 + 104.0;
+    let base_r = 18.0 + page_state.zen_tab.progress * 26.0;
+
+    // Concentric breathing rings
+    surface.fill_circle(cx, cy, base_r, fade_color(0x3338BDF8, alpha));
+    surface.fill_circle(cx, cy, base_r * 0.7, fade_color(0x662DD4BF, alpha));
+    surface.fill_circle(cx, cy, 6.0, fade_color(COLOR_TEXT_WHITE, alpha));
+}
+
+unsafe fn render_gdi_hardware(hdc: HDC, x0: i32, y0: i32, cur_w: i32, page_state: &PageState) {
+    let hfont = create_font(13, 600);
+    let old_font = SelectObject(hdc, hfont);
+
+    SetTextColor(hdc, COLORREF(0x00FFFFFF));
+    let mut title = format!(
+        "CPU: {}%   RAM: {:.1}/{:.0} GB ({}%)",
+        page_state.hw_tab.cpu_pct,
+        page_state.hw_tab.ram_used_gb,
+        page_state.hw_tab.ram_total_gb,
+        page_state.hw_tab.ram_pct
+    )
+    .encode_utf16()
+    .collect::<Vec<u16>>();
+
+    let mut rect = RECT {
+        left: x0 + 16,
+        top: y0 + 44,
+        right: x0 + cur_w - 16,
+        bottom: y0 + 64,
+    };
+    DrawTextW(hdc, &mut title, &mut rect, DT_CENTER | DT_SINGLELINE);
+
+    SelectObject(hdc, old_font);
+    let _ = DeleteObject(hfont);
+}
+
+unsafe fn render_gdi_zen(hdc: HDC, x0: i32, y0: i32, cur_w: i32, page_state: &PageState) {
+    let hfont = create_font(14, 600);
+    let old_font = SelectObject(hdc, hfont);
+
+    SetTextColor(hdc, COLORREF(0x00FFFFFF));
+    let phase_str = match page_state.zen_tab.phase {
+        BreathPhase::Inhale => "Inhale (Deeply)",
+        BreathPhase::Hold => "Hold Breath",
+        BreathPhase::Exhale => "Exhale (Slowly)",
+    };
+    let mut text = format!("Zen: {}  •  Cycle {}", phase_str, page_state.zen_tab.completed_cycles)
+        .encode_utf16()
+        .collect::<Vec<u16>>();
+
+    let mut rect = RECT {
+        left: x0 + 16,
+        top: y0 + 44,
+        right: x0 + cur_w - 16,
+        bottom: y0 + 66,
+    };
+    DrawTextW(hdc, &mut text, &mut rect, DT_CENTER | DT_SINGLELINE);
+
+    SelectObject(hdc, old_font);
+    let _ = DeleteObject(hfont);
+}
+

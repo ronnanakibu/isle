@@ -22,6 +22,8 @@ use crate::gesture::*;
 
 const TIMER_ANIMATION: usize = 1;
 const TIMER_MASCOT_BLINK: usize = 2;
+const TIMER_HOVER_ENTER: usize = 3;
+const TIMER_HOVER_LEAVE: usize = 4;
 const WIN_WM_MOUSELEAVE: u32 = 0x02A3;
 
 pub struct WindowContext {
@@ -340,6 +342,25 @@ fn hit_test(x: f32, y: f32, x0: f32, y0: f32, cur_w: f32, cur_h: f32, current_pa
                 }
             }
         }
+        PageId::Hardware => {
+            if y >= y0 + 100.0 && y <= y0 + 130.0 {
+                let pill_w = 78.0;
+                let spacing = 8.0;
+                let total_w = 3.0 * pill_w + 2.0 * spacing;
+                let start_x = x0 + (cur_w - total_w) * 0.5;
+                for i in 0..3 {
+                    let px = start_x + (i as f32) * (pill_w + spacing);
+                    if x >= px && x <= px + pill_w {
+                        return HitTarget::HardwarePlan(i);
+                    }
+                }
+            }
+        }
+        PageId::Zen => {
+            if (y - (y0 + 100.0)).abs() < 24.0 && (x - center_x).abs() < 40.0 {
+                return HitTarget::ZenToggle;
+            }
+        }
     }
 
     HitTarget::None
@@ -353,6 +374,33 @@ unsafe extern "system" fn wndproc(
 ) -> LRESULT {
     let ctx_ptr = &raw mut CONTEXT;
     match msg {
+        WM_NCHITTEST => {
+            let x = (lparam.0 & 0xFFFF) as i16 as i32;
+            let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+
+            let mut rect = RECT::default();
+            let _ = GetWindowRect(hwnd, &mut rect);
+
+            let local_x = (x - rect.left) as f32;
+            let local_y = (y - rect.top) as f32;
+
+            if let Some(ctx) = (*ctx_ptr).as_ref() {
+                let cur_w = ctx.width_spring.current;
+                let cur_h = ctx.height_spring.current;
+                let is_flat_top = ctx.settings.mode == Mode::Notch;
+                let center_x = (CANVAS_WIDTH as f32) * 0.5;
+                let x0 = center_x - cur_w * 0.5;
+                let y0 = if is_flat_top { 0.0 } else { 10.0 };
+
+                if local_x >= (x0 - 4.0) && local_x <= (x0 + cur_w + 4.0)
+                    && local_y >= y0 && local_y <= (y0 + cur_h + 4.0)
+                {
+                    return LRESULT(HTCLIENT as isize);
+                }
+            }
+            LRESULT(HTTRANSPARENT as isize)
+        }
+
         WM_MOUSEMOVE => {
             let x = (lparam.0 & 0xFFFF) as i16 as f32;
             let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as f32;
@@ -376,20 +424,16 @@ unsafe extern "system" fn wndproc(
                     && y <= (y0 + cur_h + 8.0);
 
                 if inside_island {
+                    let _ = KillTimer(hwnd, TIMER_HOVER_LEAVE);
                     if !ctx.is_hovered {
-                        ctx.is_hovered = true;
-                        ctx.width_spring.set_target(EXPANDED_WIDTH);
-                        ctx.height_spring.set_target(EXPANDED_HEIGHT);
-
                         let mut tme: TRACKMOUSEEVENT = zeroed();
                         tme.cbSize = std::mem::size_of::<TRACKMOUSEEVENT>() as u32;
                         tme.dwFlags = TME_LEAVE;
                         tme.hwndTrack = hwnd;
                         let _ = TrackMouseEvent(&mut tme);
 
-                        if !ctx.is_animating {
-                            ctx.is_animating = true;
-                            SetTimer(hwnd, TIMER_ANIMATION, 16, None);
+                        if ctx.settings.trigger == crate::settings::TriggerMode::Hover {
+                            SetTimer(hwnd, TIMER_HOVER_ENTER, 200, None);
                         }
                     }
 
@@ -398,22 +442,19 @@ unsafe extern "system" fn wndproc(
                             ctx.hovered_hit = HitTarget::None;
                             update_window_surface();
                         }
-                    } else {
+                    } else if ctx.is_hovered {
                         let hit = hit_test(x, y, x0, y0, cur_w, cur_h, ctx.page_state.current_page);
                         if hit != ctx.hovered_hit {
                             ctx.hovered_hit = hit;
                             update_window_surface();
                         }
                     }
-                } else if ctx.is_hovered && !ctx.pager.is_dragging() {
-                    ctx.is_hovered = false;
-                    ctx.hovered_hit = HitTarget::None;
-                    ctx.width_spring.set_target(COMPACT_WIDTH);
-                    ctx.height_spring.set_target(COMPACT_HEIGHT);
-
-                    if !ctx.is_animating {
-                        ctx.is_animating = true;
-                        SetTimer(hwnd, TIMER_ANIMATION, 16, None);
+                } else {
+                    let _ = KillTimer(hwnd, TIMER_HOVER_ENTER);
+                    if ctx.is_hovered && !ctx.pager.is_dragging() {
+                        if ctx.settings.trigger == crate::settings::TriggerMode::Hover {
+                            SetTimer(hwnd, TIMER_HOVER_LEAVE, 260, None);
+                        }
                     }
                 }
             }
@@ -421,16 +462,11 @@ unsafe extern "system" fn wndproc(
         }
 
         WIN_WM_MOUSELEAVE => {
+            let _ = KillTimer(hwnd, TIMER_HOVER_ENTER);
             if let Some(ctx) = (*ctx_ptr).as_mut() {
-                if !ctx.pager.is_dragging() {
-                    ctx.is_hovered = false;
-                    ctx.hovered_hit = HitTarget::None;
-                    ctx.width_spring.set_target(COMPACT_WIDTH);
-                    ctx.height_spring.set_target(COMPACT_HEIGHT);
-
-                    if !ctx.is_animating {
-                        ctx.is_animating = true;
-                        SetTimer(hwnd, TIMER_ANIMATION, 16, None);
+                if ctx.is_hovered && !ctx.pager.is_dragging() {
+                    if ctx.settings.trigger == crate::settings::TriggerMode::Hover {
+                        SetTimer(hwnd, TIMER_HOVER_LEAVE, 260, None);
                     }
                 }
             }
@@ -442,6 +478,19 @@ unsafe extern "system" fn wndproc(
             let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as f32;
 
             if let Some(ctx) = (*ctx_ptr).as_mut() {
+                if !ctx.is_hovered {
+                    let _ = KillTimer(hwnd, TIMER_HOVER_ENTER);
+                    let _ = KillTimer(hwnd, TIMER_HOVER_LEAVE);
+                    ctx.is_hovered = true;
+                    ctx.width_spring.set_target(EXPANDED_WIDTH);
+                    ctx.height_spring.set_target(EXPANDED_HEIGHT);
+                    if !ctx.is_animating {
+                        ctx.is_animating = true;
+                        SetTimer(hwnd, TIMER_ANIMATION, 16, None);
+                    }
+                    return LRESULT(0);
+                }
+
                 let expand_t = ((ctx.width_spring.current - COMPACT_WIDTH) / (EXPANDED_WIDTH - COMPACT_WIDTH)).clamp(0.0, 1.0);
                 if expand_t > 0.7 {
                     let cur_w = ctx.width_spring.current;
@@ -623,6 +672,33 @@ unsafe extern "system" fn wndproc(
                         update_window_surface();
                     }
                 }
+            } else if timer_id == TIMER_HOVER_ENTER {
+                let _ = KillTimer(hwnd, TIMER_HOVER_ENTER);
+                if let Some(ctx) = (*ctx_ptr).as_mut() {
+                    if !ctx.is_hovered {
+                        ctx.is_hovered = true;
+                        ctx.width_spring.set_target(EXPANDED_WIDTH);
+                        ctx.height_spring.set_target(EXPANDED_HEIGHT);
+                        if !ctx.is_animating {
+                            ctx.is_animating = true;
+                            SetTimer(hwnd, TIMER_ANIMATION, 16, None);
+                        }
+                    }
+                }
+            } else if timer_id == TIMER_HOVER_LEAVE {
+                let _ = KillTimer(hwnd, TIMER_HOVER_LEAVE);
+                if let Some(ctx) = (*ctx_ptr).as_mut() {
+                    if ctx.is_hovered && !ctx.pager.is_dragging() {
+                        ctx.is_hovered = false;
+                        ctx.hovered_hit = HitTarget::None;
+                        ctx.width_spring.set_target(COMPACT_WIDTH);
+                        ctx.height_spring.set_target(COMPACT_HEIGHT);
+                        if !ctx.is_animating {
+                            ctx.is_animating = true;
+                            SetTimer(hwnd, TIMER_ANIMATION, 16, None);
+                        }
+                    }
+                }
             }
             LRESULT(0)
         }
@@ -636,6 +712,8 @@ unsafe extern "system" fn wndproc(
             remove_tray_icon(hwnd);
             let _ = KillTimer(hwnd, TIMER_ANIMATION);
             let _ = KillTimer(hwnd, TIMER_MASCOT_BLINK);
+            let _ = KillTimer(hwnd, TIMER_HOVER_ENTER);
+            let _ = KillTimer(hwnd, TIMER_HOVER_LEAVE);
             PostQuitMessage(0);
             LRESULT(0)
         }
@@ -663,6 +741,10 @@ fn handle_tray_cmd(ctx: &mut WindowContext, cmd: TrayCmd) {
                 let _ = SetWindowPos(ctx.hwnd, HWND_TOPMOST, x, y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
             }
             unsafe { update_window_surface(); }
+        }
+        TrayCmd::Trigger(trigger) => {
+            ctx.settings.trigger = trigger;
+            ctx.settings.save();
         }
         TrayCmd::ToggleStartup => {
             let on = !ctx.settings.autostart;

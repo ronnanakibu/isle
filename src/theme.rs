@@ -45,3 +45,55 @@ pub const APPLE_BLUE: u32 = 0xFF007AFF; // iOS System Blue
 pub const COLOR_TRACK_BG: u32 = 0x33FFFFFF; // 20% white scrubber track
 pub const COLOR_CONTROL_BG: u32 = 0x1EFFFFFF; // Circle button glass
 pub const COLOR_CONTROL_HOVER: u32 = 0x3AFFFFFF;
+
+// 4 Theme System
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThemeId {
+    Obsidian,
+    Pearl,
+    OledDark,
+    LiquidGlass,
+}
+
+pub struct ThemeColors {
+    pub surface: u32,
+    pub border: u32,
+    pub text_primary: u32,
+    pub text_secondary: u32,
+    pub accent: u32,
+}
+
+impl ThemeId {
+    pub fn colors(&self) -> ThemeColors {
+        match self {
+            ThemeId::Obsidian => ThemeColors {
+                surface: 0xFA0C0D10,
+                border: 0x24FFFFFF,
+                text_primary: COLOR_TEXT_WHITE,
+                text_secondary: COLOR_TEXT_SECONDARY,
+                accent: APPLE_CYAN,
+            },
+            ThemeId::Pearl => ThemeColors {
+                surface: 0xF2F5F7FA,
+                border: 0x20000000,
+                text_primary: 0xFF18181B,
+                text_secondary: 0xFF71717A,
+                accent: APPLE_BLUE,
+            },
+            ThemeId::OledDark => ThemeColors {
+                surface: COLOR_ISLAND_BLACK,
+                border: 0x1FFFFFFF,
+                text_primary: COLOR_TEXT_WHITE,
+                text_secondary: COLOR_TEXT_SECONDARY,
+                accent: APPLE_CYAN,
+            },
+            ThemeId::LiquidGlass => ThemeColors {
+                surface: 0xD914161D,
+                border: 0x33FFFFFF,
+                text_primary: COLOR_TEXT_WHITE,
+                text_secondary: COLOR_TEXT_SECONDARY,
+                accent: APPLE_PURPLE,
+            },
+        }
+    }
+}

@@ -1,5 +1,5 @@
 //! System Tray Icon & Modal Settings Menu
-use crate::settings::{Mode, MonitorChoice, Settings};
+use crate::settings::{Mode, MonitorChoice, Settings, TriggerMode};
 use std::mem::{size_of, zeroed};
 use windows::{
     core::w,
@@ -19,10 +19,13 @@ const ID_MON_PRIMARY: usize = 1003;
 const ID_MON_SECONDARY: usize = 1004;
 const ID_STARTUP: usize = 1005;
 const ID_QUIT: usize = 1006;
+const ID_TRIGGER_CLICK: usize = 1007;
+const ID_TRIGGER_HOVER: usize = 1008;
 
 pub enum TrayCmd {
     Mode(Mode),
     Monitor(MonitorChoice),
+    Trigger(TriggerMode),
     ToggleStartup,
     Quit,
 }
@@ -64,6 +67,10 @@ pub fn show_tray_menu(hwnd: HWND, s: &Settings, monitor_count: usize) -> Option<
         let _ = AppendMenuW(menu, chk(s.mode == Mode::Floating), ID_FLOAT, w!("Floating Pill Mode (10px)"));
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
 
+        let _ = AppendMenuW(menu, chk(s.trigger == TriggerMode::Click), ID_TRIGGER_CLICK, w!("Click to Expand"));
+        let _ = AppendMenuW(menu, chk(s.trigger == TriggerMode::Hover), ID_TRIGGER_HOVER, w!("Hover to Expand"));
+        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
+
         let _ = AppendMenuW(menu, chk(s.monitor == MonitorChoice::Primary), ID_MON_PRIMARY, w!("Primary Display"));
         let sec = chk(s.monitor == MonitorChoice::Secondary)
             | if monitor_count < 2 { MF_GRAYED } else { MENU_ITEM_FLAGS(0) };
@@ -98,6 +105,8 @@ pub fn show_tray_menu(hwnd: HWND, s: &Settings, monitor_count: usize) -> Option<
             ID_MON_PRIMARY => Some(TrayCmd::Monitor(MonitorChoice::Primary)),
             ID_MON_SECONDARY => Some(TrayCmd::Monitor(MonitorChoice::Secondary)),
             ID_STARTUP => Some(TrayCmd::ToggleStartup),
+            ID_TRIGGER_CLICK => Some(TrayCmd::Trigger(TriggerMode::Click)),
+            ID_TRIGGER_HOVER => Some(TrayCmd::Trigger(TriggerMode::Hover)),
             ID_QUIT => Some(TrayCmd::Quit),
             _ => None,
         }

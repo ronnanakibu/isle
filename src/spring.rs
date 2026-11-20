@@ -12,12 +12,31 @@ pub struct Spring {
 
 impl Spring {
     pub fn new(initial: f32) -> Self {
+        Self::apple_spring(initial)
+    }
+
+    /// Apple HIG Island Spring: stiffness 380, damping 30, mass 0.8
+    pub fn apple_spring(initial: f32) -> Self {
+        Self::from_physics(initial, 380.0, 30.0, 0.8)
+    }
+
+    /// Apple HIG Micro Spring: stiffness 480, damping 28, mass 0.6
+    #[allow(dead_code)]
+    pub fn micro_spring(initial: f32) -> Self {
+        Self::from_physics(initial, 480.0, 28.0, 0.6)
+    }
+
+    /// Construct spring from physical parameters (stiffness, damping, mass)
+    pub fn from_physics(initial: f32, stiffness: f32, damping: f32, mass: f32) -> Self {
+        let m = mass.max(0.01);
+        let omega = (stiffness / m).sqrt();
+        let zeta = damping / (2.0 * (m * stiffness).sqrt());
         Self {
             current: initial,
             target: initial,
             velocity: 0.0,
-            omega: 16.0,
-            zeta: 0.72,
+            omega,
+            zeta,
         }
     }
 

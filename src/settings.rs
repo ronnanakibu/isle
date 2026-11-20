@@ -24,10 +24,17 @@ pub enum MonitorChoice {
     Secondary,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum TriggerMode {
+    Click,
+    Hover,
+}
+
 #[derive(Clone, Copy)]
 pub struct Settings {
     pub mode: Mode,
     pub monitor: MonitorChoice,
+    pub trigger: TriggerMode,
     pub autostart: bool,
 }
 
@@ -90,6 +97,7 @@ impl Settings {
         let mut s = Settings {
             mode: Mode::Notch,
             monitor: MonitorChoice::Primary,
+            trigger: TriggerMode::Click,
             autostart: false,
         };
         if let Some(h) = open_app_key() {
@@ -98,6 +106,9 @@ impl Settings {
             }
             if get_dword(h, w!("Monitor")) == Some(1) {
                 s.monitor = MonitorChoice::Secondary;
+            }
+            if get_dword(h, w!("Trigger")) == Some(1) {
+                s.trigger = TriggerMode::Hover;
             }
             unsafe {
                 let _ = RegCloseKey(h);
@@ -111,6 +122,7 @@ impl Settings {
         if let Some(h) = open_app_key() {
             set_dword(h, w!("Mode"), (self.mode == Mode::Floating) as u32);
             set_dword(h, w!("Monitor"), (self.monitor == MonitorChoice::Secondary) as u32);
+            set_dword(h, w!("Trigger"), (self.trigger == TriggerMode::Hover) as u32);
             unsafe {
                 let _ = RegCloseKey(h);
             }
